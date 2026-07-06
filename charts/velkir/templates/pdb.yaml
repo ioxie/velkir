@@ -1,0 +1,19 @@
+{{/*
+Operator-self PodDisruptionBudget. Only emitted when replicas > 1
+(a PDB at minAvailable=1 with replicas=1 always blocks every
+disruption — pointless and surprising during node maintenance).
+*/}}
+{{- if gt (int .Values.replicas) 1 -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "velkir.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "velkir.selectorLabels" . | nindent 6 }}
+{{- end }}

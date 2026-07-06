@@ -1,0 +1,92 @@
+{{/*
+Operator-self NetworkPolicy.
+
+Ingress: webhook (apiserver admission), metrics (Prometheus scrape),
+healthz (kubelet probes). All three default to allow-from-anywhere — the
+apiserver dials the webhook from an unpredictable source IP and scrapers
+may live in any namespace. Hardened installs can narrow the webhook and
+metrics ports via networkPolicy.webhookFrom / networkPolicy.metricsFrom
+(each a list of NetworkPolicyPeer entries); healthz stays open because
+kubelet probes originate from the node IP, which a peer selector can't
+reliably match.
+
+Egress is enumerated rather than allow-all: the operator talks to the
+apiserver, kube-dns, sentinel pods (port 26379), and valkey pods
+(port 6379). Each rule is gated by the corresponding chart value so
+deployments can narrow further without forking the template.
+*/}}
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "velkir.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "velkir.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # webhook (apiserver admission). networkPolicy.webhookFrom narrows the
+    # source peers on hardened installs (e.g. the apiserver / control-plane
+    # namespace); empty (default) allows from anywhere — the apiserver's
+    # source IP is not predictable enough to selector by default.
+    - ports:
+        - port: webhook
+          protocol: TCP
+      {{- with .Values.networkPolicy.webhookFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    # metrics (Prometheus scrape). networkPolicy.metricsFrom narrows the
+    # source peers (e.g. the monitoring namespace); empty (default) allows
+    # from anywhere — scrapers may live in any namespace.
+    - ports:
+        - port: metrics
+          protocol: TCP
+      {{- with .Values.networkPolicy.metricsFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    # healthz (kubelet probes) — always open: probes originate from the
+    # node IP, which a peer selector can't reliably match.
+    - ports:
+        - port: healthz
+          protocol: TCP
+  egress:
+    # DNS — required for ServiceName resolution on every apiserver
+    # round-trip and for sentinel/valkey pod-IP lookups when the
+    # operator resolves Service names.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # apiserver — controller-runtime + client-go watch/list/get/patch
+    # over kubernetes.default.svc (HTTPS). Ports come from
+    # networkPolicy.apiServerPorts so a non-standard apiserver port can
+    # be allowed without forking the template.
+    - ports:
+        {{- range .Values.networkPolicy.apiServerPorts }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+    # Sentinel + Valkey data-plane reach — operator probes sentinel
+    # (:26379) and valkey (:6379) pods across the cluster. Matched by
+    # the well-known managed-by label the operator stamps onto every
+    # owned pod; ad-hoc Valkey CRs in any namespace are reachable.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: velkir
+      ports:
+        - port: 26379
+          protocol: TCP
+        - port: 6379
+          protocol: TCP
+{{- end }}

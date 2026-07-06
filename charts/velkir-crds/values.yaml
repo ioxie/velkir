@@ -1,0 +1,10 @@
+# CRDs chart values surface. The chart is intentionally minimal — only the
+# toggle for whether to render CRDs (so clusters that manage CRDs out of band
+# can install the operator chart without double-installing CRDs).
+
+crds:
+  create: true
+  # Protect CRDs from accidental deletion on `helm uninstall`. With keep=true,
+  # Helm refuses to delete the CRD manifests; CRs survive until explicitly
+  # deleted by an operator.
+  keep: true

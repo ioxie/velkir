@@ -1,0 +1,33 @@
+{{- if .Values.crds.create }}
+{{ .Chart.Name }} {{ .Chart.AppVersion }} installed.
+
+CRDs rendered:
+  - valkeys.velkir.ioxie.dev
+  - sentinelquorums.velkir.ioxie.dev
+{{ if .Values.crds.keep }}
+The CRDs carry the `helm.sh/resource-policy: keep` annotation, so
+`helm uninstall` will leave them in place. Any existing Valkey or
+SentinelQuorum custom resources continue to exist after uninstall —
+the operator just stops reconciling them.
+
+To remove the CRDs explicitly (this cascade-deletes every Valkey and
+SentinelQuorum CR in the cluster):
+
+  kubectl get valkeys -A
+  kubectl get sentinelquorums -A
+  kubectl delete crd valkeys.velkir.ioxie.dev sentinelquorums.velkir.ioxie.dev
+
+To opt out of the keep behaviour for future installs:
+
+  --set crds.keep=false
+{{- else }}
+The CRDs do NOT carry `helm.sh/resource-policy: keep` (crds.keep=false).
+`helm uninstall` will delete the CRDs, which cascade-deletes every
+Valkey and SentinelQuorum CR in the cluster.
+{{- end }}
+{{- else }}
+{{ .Chart.Name }} {{ .Chart.AppVersion }} installed with crds.create=false.
+
+No CRDs were rendered by this chart. Install them out-of-band before
+the operator can reconcile any Valkey or SentinelQuorum CRs.
+{{- end }}

@@ -1,0 +1,20 @@
+# Public contribution label manifest for the Velkir GitHub repository.
+# Type labels are applied automatically by the issue-form templates; the status
+# labels are applied by maintainers while triaging the public contribution
+# funnel. Each entry has a name, a 6-hex color (no leading '#'), and a
+# description. Apply with a label-sync tool of your choice.
+- name: bug
+  color: d73a4a
+  description: A reproducible defect in the operator
+- name: enhancement
+  color: a2eeef
+  description: A proposed new feature or improvement
+- name: "status:needs-rework"
+  color: fbca04
+  description: Changes were requested; awaiting an update from the author
+- name: "status:stale"
+  color: ededed
+  description: No activity for an extended period; may be closed if it stays quiet
+- name: "status:superseded"
+  color: cfd3d7
+  description: Replaced by another issue or pull request

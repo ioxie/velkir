@@ -1,0 +1,62 @@
+# Restricts ingress to the sentinel pods of the `my-valkey` CR in
+# the `default` namespace. Replace `my-valkey` and the namespace
+# before applying. Sentinel mode only — has no effect on standalone
+# or replication-without-sentinel CRs.
+#
+# Four `from:` blocks:
+#   1. Application clients (sentinel discovery on port 26379)
+#   2. Sibling sentinels (gossip / discovery)
+#   3. The operator (pubsub subscription + admin commands)
+#   4. Prometheus scraping the redis_exporter sidecar on port 9121
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-valkey-sentinel-ingress
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: velkir
+      velkir.ioxie.dev/cr: my-valkey
+      velkir.ioxie.dev/component: sentinel
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              velkir.ioxie.dev/client: "true"
+      ports:
+        - protocol: TCP
+          port: 26379
+
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: velkir
+              velkir.ioxie.dev/cr: my-valkey
+              velkir.ioxie.dev/component: sentinel
+      ports:
+        - protocol: TCP
+          port: 26379
+
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: velkir-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: velkir
+      ports:
+        - protocol: TCP
+          port: 26379
+
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9121

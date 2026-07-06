@@ -1,0 +1,54 @@
+# Restricts egress from Valkey + sentinel pods of the `my-valkey`
+# CR. Replace `my-valkey` and the namespace before applying.
+#
+# The egress policy is sharper than ingress because unconstrained
+# egress lets a compromised container ship data off-cluster. Three
+# `to:` blocks:
+#   1. DNS (kube-system, UDP/TCP 53)
+#   2. Within-CR peers — Valkey ↔ sentinel + Valkey ↔ Valkey
+#      replication on ports 6379 and 26379
+#   3. The Kubernetes apiserver (only relevant if a future init
+#      container needs to read API objects; remove if your stack
+#      doesn't use that path)
+#
+# If your application requires Valkey to replicate to a remote cluster
+# or proxy, add a specific `to:` block for that destination — leaving
+# unrestricted egress would defeat the policy's purpose.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-valkey-egress
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: velkir
+      velkir.ioxie.dev/cr: my-valkey
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: velkir
+              velkir.ioxie.dev/cr: my-valkey
+      ports:
+        - { protocol: TCP, port: 6379 }
+        - { protocol: TCP, port: 26379 }
+
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - { protocol: TCP, port: 443 }

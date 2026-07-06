@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velkir.ioxie.dev/schemas/velkir-crds/values.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "crds": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "keep":   { "type": "boolean" }
+      }
+    }
+  }
+}

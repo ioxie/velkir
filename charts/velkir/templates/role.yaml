@@ -1,0 +1,35 @@
+{{/*
+Namespaced Role for Secret writes in the operator's own namespace —
+the cert-injector subsystem creates and rotates the webhook
+TLS Secret here. Cluster-wide Secret write would be the canonical
+operator-CVE pattern (cf. CVE-2025-55196 ESO, CVE-2025-59303 HAProxy
+Ingress); scoping writes to {{ .Release.Namespace }} keeps the blast
+radius bounded to the operator's own namespace.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "velkir.fullname" . }}-cert-writer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "velkir.fullname" . }}-cert-writer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "velkir.fullname" . }}-cert-writer
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "velkir.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

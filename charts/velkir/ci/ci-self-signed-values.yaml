@@ -1,0 +1,9 @@
+# ct (chart-testing) matrix entry — webhook certs provisioned by the operator's
+# own DynamicAuthority path (self-signed). Default in values.yaml but kept here
+# for explicit CI coverage.
+webhook:
+  enabled: true
+  certManager:
+    enabled: false
+  selfSigned:
+    enabled: true

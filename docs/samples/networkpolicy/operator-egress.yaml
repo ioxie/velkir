@@ -1,0 +1,74 @@
+# Restricts egress from the velkir pod itself.
+#
+# Pair with the per-CR samples in this directory. Those policies
+# fence the data-plane pods (Valkey, sentinel); this one fences
+# the control-plane pod (the operator).
+#
+# Why egress on the operator: the operator holds cluster-wide
+# Secret READ. A compromised operator process with unrestricted
+# egress can exfiltrate Secret material to an external endpoint.
+# This policy limits the operator's egress to the destinations it
+# legitimately needs:
+#   1. DNS (kube-system, UDP/TCP 53)
+#   2. The Kubernetes apiserver — adapt the IP block / namespace
+#      selector for your cluster (kubeadm, RKE2, k3s, EKS, GKE
+#      all differ)
+#   3. Managed Valkey + sentinel data-plane pods, in any
+#      namespace, on TCP 6379 (Valkey) and 26379 (sentinel)
+#
+# Replace `velkir-system` with the operator's namespace if
+# you installed it elsewhere. Apply with:
+#   kubectl -n velkir-system apply -f operator-egress.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: velkir-egress
+  namespace: velkir-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: velkir
+  policyTypes: [Egress]
+  egress:
+    # 1. DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+
+    # 2. Kubernetes apiserver. Two common shapes; uncomment the one
+    # that matches your cluster and delete the other.
+    #
+    # 2a. Most managed clusters expose the apiserver via the
+    # `kubernetes` service in the `default` namespace:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+          podSelector: {}
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 6443 }
+    #
+    # 2b. Self-managed clusters where the apiserver runs on the
+    # control-plane nodes (not in a pod): allow egress to the
+    # node CIDR. Replace 10.0.0.0/16 with your control-plane node
+    # range.
+    # - to:
+    #     - ipBlock:
+    #         cidr: 10.0.0.0/16
+    #   ports:
+    #     - { protocol: TCP, port: 6443 }
+
+    # 3. Managed Valkey + sentinel pods (any namespace).
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: velkir
+      ports:
+        - { protocol: TCP, port: 6379 }
+        - { protocol: TCP, port: 26379 }

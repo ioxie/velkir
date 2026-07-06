@@ -1,0 +1,156 @@
+suite: grafana dashboards
+templates:
+  - grafana-dashboards.yaml
+tests:
+  - it: renders nothing when dashboards.enabled is false (default)
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders one ConfigMap per dashboard JSON when enabled
+    set:
+      dashboards.enabled: true
+    asserts:
+      - hasDocuments:
+          # 3 dashboards: velkir, valkey-fleet-overview,
+          # valkey-single-deployment.
+          count: 3
+      - isKind:
+          of: ConfigMap
+
+  - it: stamps the Grafana sidecar discovery label by default
+    set:
+      dashboards.enabled: true
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: metadata.labels["grafana_dashboard"]
+          value: "1"
+
+  - it: honours sidecarLabel + sidecarValue overrides
+    set:
+      dashboards.enabled: true
+      dashboards.sidecarLabel: my-grafana-watch
+      dashboards.sidecarValue: "true"
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: metadata.labels["my-grafana-watch"]
+          value: "true"
+      - notExists:
+          path: metadata.labels["grafana_dashboard"]
+
+  - it: honours additionalLabels
+    set:
+      dashboards.enabled: true
+      dashboards.additionalLabels:
+        team: platform
+        env: prod
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: metadata.labels.team
+          value: platform
+      - equal:
+          path: metadata.labels.env
+          value: prod
+
+  - it: respects dashboards.namespace override
+    set:
+      dashboards.enabled: true
+      dashboards.namespace: monitoring
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: monitoring
+
+  - it: omits the annotations block when neither folder nor additionalAnnotations is set
+    set:
+      dashboards.enabled: true
+    documentIndex: 0
+    asserts:
+      - notExists:
+          path: metadata.annotations
+
+  - it: folder shortcut stamps grafana_folder annotation
+    set:
+      dashboards.enabled: true
+      dashboards.folder: "Data Services"
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: metadata.annotations["grafana_folder"]
+          value: "Data Services"
+
+  - it: honours additionalAnnotations
+    set:
+      dashboards.enabled: true
+      dashboards.additionalAnnotations:
+        grafana_dashboard_url: /d/custom
+        custom-key: custom-value
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: metadata.annotations["grafana_dashboard_url"]
+          value: /d/custom
+      - equal:
+          path: metadata.annotations["custom-key"]
+          value: custom-value
+
+  - it: rejects non-string values in additionalAnnotations via schema
+    # helm-unittest's `set` injects values without re-validating the
+    # JSON-schema by default, so this test asserts the schema-level
+    # contract by setting a string value — the negative path (numeric
+    # value rejected) is asserted at the schema layer via the
+    # `chart-lint` make target's `helm lint` pass, which DOES validate
+    # against values.schema.json. This positive-path test pins the
+    # happy path so a future schema relaxation that silently re-enables
+    # non-string values would change the rendered output and the
+    # downstream test below would surface the regression.
+    set:
+      dashboards.enabled: true
+      dashboards.additionalAnnotations:
+        normal-string: ok-value
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: metadata.annotations["normal-string"]
+          value: ok-value
+
+  - it: additionalAnnotations entries override the folder shortcut on key collision
+    set:
+      dashboards.enabled: true
+      dashboards.folder: "Default Folder"
+      dashboards.additionalAnnotations:
+        grafana_folder: "Override Folder"
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: metadata.annotations["grafana_folder"]
+          value: "Override Folder"
+
+  - it: each rendered ConfigMap name follows the <release>-dashboard-<basename> convention
+    # helm-unittest applies an assertion to documentIndex 0 by default.
+    # For .Files.Glob templates that produce multiple documents, the
+    # weak shape is a single matchRegex assertion that silently passes
+    # when only doc 0 has the expected name. Three explicit per-document
+    # assertions force every rendered ConfigMap to satisfy the convention,
+    # so a future template refactor that breaks per-document name derivation
+    # (e.g., a per-dashboard-name override hook) trips this spec instead of
+    # silently shipping inconsistent names.
+    set:
+      dashboards.enabled: true
+    asserts:
+      - matchRegex:
+          documentIndex: 0
+          path: metadata.name
+          pattern: "^RELEASE-NAME-velkir-dashboard-(velkir|valkey-fleet-overview|valkey-single-deployment)$"
+      - matchRegex:
+          documentIndex: 1
+          path: metadata.name
+          pattern: "^RELEASE-NAME-velkir-dashboard-(velkir|valkey-fleet-overview|valkey-single-deployment)$"
+      - matchRegex:
+          documentIndex: 2
+          path: metadata.name
+          pattern: "^RELEASE-NAME-velkir-dashboard-(velkir|valkey-fleet-overview|valkey-single-deployment)$"

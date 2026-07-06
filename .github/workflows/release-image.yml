@@ -1,0 +1,257 @@
+# Release-image pipeline: on a v* tag push, build the operator manager image
+# natively for linux/amd64 and linux/arm64 (each arch compiles at full speed
+# on its own runner hardware — no QEMU emulation layer), push each per-arch
+# image to GHCR by digest only, then fuse the two digests into a single
+# multi-arch manifest list under the release tag.
+#
+# The v* filter cannot fire on chart tags: GitHub matches tag filters against
+# the full tag name, so chart-v1.2.3 does not match v*.
+#
+# The per-arch digests travel between jobs as job outputs (a digest is a short
+# string, not a file) — no artifact upload/download round-trip. Because the
+# per-arch pushes are digest-only and the tag is written last by the merge
+# job, the release tag either resolves to the complete two-platform list or
+# does not exist at all; a half-finished release never surfaces under it.
+#
+# After the merge, the sign job attaches the release evidence to the fused
+# manifest-list digest — a keyless cosign signature (recorded in the Rekor
+# transparency log), an SPDX SBOM attestation, and GitHub build provenance —
+# never to the floating tag, so verifiers pin to exactly the bytes the merge
+# job pushed.
+name: release-image
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Read-only by default. The jobs that push to GHCR each elevate
+# packages: write individually (least privilege).
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/ioxie/velkir/manager
+
+jobs:
+  build-amd64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build and push linux/amd64 by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          # Single native platform — the arm64 half builds in the sibling job.
+          platforms: linux/amd64
+          # Stamp the in-binary version with the release tag (Dockerfile ARG).
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          # push-by-digest pushes the image WITHOUT a tag (the merge job below
+          # writes the only tag); name-canonical pins the output reference to
+          # the fully-qualified repository so the emitted digest is directly
+          # addressable at merge time.
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # buildx's default min-mode provenance would wrap the per-arch push
+          # in an extra attestation manifest (an unknown/unknown platform entry
+          # in the final list). Keep the pushed artifact a plain single-arch
+          # image manifest; release attestations are attached after the merge,
+          # against the fused manifest-list digest.
+          provenance: false
+
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build and push linux/arm64 by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/arm64
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          provenance: false
+
+  merge:
+    # Fuse the two per-arch digests into one multi-arch manifest list tagged
+    # with the release tag. Gated on BOTH builds having pushed successfully.
+    needs:
+      - build-amd64
+      - build-arm64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Create and push the multi-arch manifest list
+        env:
+          AMD64_DIGEST: ${{ needs.build-amd64.outputs.digest }}
+          ARM64_DIGEST: ${{ needs.build-arm64.outputs.digest }}
+        # An unset job output coerces to the empty string, and imagetools
+        # would then be handed a truncated "image@" reference — validate the
+        # digest shape first so the failure names the real problem (fail
+        # closed, never publish a one-arch list under the release tag).
+        run: |
+          set -euo pipefail
+          for d in "$AMD64_DIGEST" "$ARM64_DIGEST"; do
+            case "$d" in
+              sha256:*) ;;
+              *) echo "::error::per-arch digest missing or malformed: '$d'"; exit 1 ;;
+            esac
+          done
+          docker buildx imagetools create \
+            -t "${IMAGE}:${GITHUB_REF_NAME}" \
+            "${IMAGE}@${AMD64_DIGEST}" \
+            "${IMAGE}@${ARM64_DIGEST}"
+      - name: Verify the pushed manifest list
+        # Resolve the fresh tag straight from the registry: a missing platform
+        # or a dangling per-arch digest fails the release here, not at a
+        # user's pull time.
+        run: docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}"
+      - name: Resolve the manifest-list digest
+        id: digest
+        # The sign job downstream operates on this digest only, so derive it
+        # fail-closed: an empty or malformed value stops the release here
+        # rather than handing the signing steps a truncated "image@" reference.
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}" --format '{{json .Manifest}}' \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
+          if ! printf '%s' "$digest" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::manifest-list digest missing or malformed: '$digest'"
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+  sign:
+    # Attach the release evidence to the immutable manifest-list digest from
+    # the merge job — never the floating tag, which could in principle move
+    # between jobs. Keyless signing: the job's OIDC identity signs, the
+    # signature is recorded in the Rekor transparency log, and no long-lived
+    # signing key exists to leak or rotate.
+    # The per-arch build digests ride along so each platform's SBOM can be
+    # attested against the child image a puller of that platform actually
+    # receives — an index-level scan would silently describe only the
+    # runner's own architecture.
+    needs:
+      - merge
+      - build-amd64
+      - build-arm64
+    runs-on: ubuntu-24.04
+    # Keyless signing and attestation block on external services (OIDC
+    # endpoint, Fulcio, Rekor, GHCR); a bounded timeout fails a hung call
+    # fast instead of holding the runner to the 6-hour default.
+    timeout-minutes: 15
+    # No checkout — every step operates on the registry artifact — so the job
+    # carries no contents scope at all. id-token mints the OIDC identity for
+    # keyless signing and provenance; attestations stores the GitHub
+    # provenance record; packages pushes signatures + attestations to GHCR.
+    permissions:
+      id-token: write
+      packages: write
+      attestations: write
+    env:
+      DIGEST: ${{ needs.merge.outputs.digest }}
+      AMD64_DIGEST: ${{ needs.build-amd64.outputs.digest }}
+      ARM64_DIGEST: ${{ needs.build-arm64.outputs.digest }}
+    steps:
+      # Each step carries the repository guard so the signing surface stays
+      # inert on forks: a fork's run would mint attestations under the fork's
+      # identity and pollute the verification story for the canonical image.
+      - name: Validate the manifest-list and per-arch digests
+        if: github.repository == 'ioxie/velkir'
+        # A lost job output coerces to the empty string; refuse to hand the
+        # signing steps a truncated "image@" reference (fail closed).
+        run: |
+          set -euo pipefail
+          for d in "$DIGEST" "$AMD64_DIGEST" "$ARM64_DIGEST"; do
+            if ! printf '%s' "$d" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+              echo "::error::digest missing or malformed: '$d'"
+              exit 1
+            fi
+          done
+      - name: Log in to GHCR
+        if: github.repository == 'ioxie/velkir'
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install cosign
+        if: github.repository == 'ioxie/velkir'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign the manifest list (keyless)
+        if: github.repository == 'ioxie/velkir'
+        # --yes skips the interactive confirmation for the transparency-log
+        # upload; Rekor inclusion is what downstream verifiers check.
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+      - name: Install syft
+        if: github.repository == 'ioxie/velkir'
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+      - name: Generate per-platform SPDX SBOMs from the pushed images
+        if: github.repository == 'ioxie/velkir'
+        # Scan each per-arch registry artifact (not the build context, and not
+        # the index — handed an index, syft silently resolves it to the
+        # runner's own platform) so each SBOM describes exactly what a puller
+        # of that platform receives.
+        run: |
+          syft "${IMAGE}@${AMD64_DIGEST}" -o spdx-json=sbom.amd64.spdx.json
+          syft "${IMAGE}@${ARM64_DIGEST}" -o spdx-json=sbom.arm64.spdx.json
+      - name: Attest each SBOM against its per-arch digest
+        if: github.repository == 'ioxie/velkir'
+        run: |
+          cosign attest --yes --type spdxjson --predicate sbom.amd64.spdx.json "${IMAGE}@${AMD64_DIGEST}"
+          cosign attest --yes --type spdxjson --predicate sbom.arm64.spdx.json "${IMAGE}@${ARM64_DIGEST}"
+      - name: Attach GitHub build provenance
+        if: github.repository == 'ioxie/velkir'
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ needs.merge.outputs.digest }}
+          # Attach the provenance to the image in GHCR as well as the GitHub
+          # attestation store, so registry-side verifiers find it too.
+          push-to-registry: true

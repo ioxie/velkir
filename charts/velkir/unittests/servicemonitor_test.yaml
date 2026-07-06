@@ -1,0 +1,85 @@
+suite: servicemonitor.yaml — ServiceMonitor for the operator's secure metrics endpoint
+templates:
+  - servicemonitor.yaml
+tests:
+  - it: renders nothing when metrics.serviceMonitor.enabled is false (default)
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders a ServiceMonitor when metrics.serviceMonitor.enabled is true
+    set:
+      metrics:
+        serviceMonitor:
+          enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: ServiceMonitor
+      - equal:
+          path: apiVersion
+          value: monitoring.coreos.com/v1
+
+  # honorLabels: true is load-bearing. The operator stamps per-CR
+  # labels (namespace/pod/name) on its gauges; without honorLabels
+  # Prometheus's default collision rule keeps the scrape-target's
+  # labels and renames the operator-stamped originals to
+  # exported_*, breaking the Valkey Single Deployment dashboard's
+  # namespace/CR dropdowns.
+  - it: endpoint sets honorLabels true so operator-stamped labels survive scrape
+    set:
+      metrics:
+        serviceMonitor:
+          enabled: true
+    asserts:
+      - equal:
+          path: spec.endpoints[0].honorLabels
+          value: true
+
+  - it: endpoint defaults to https with Bearer token + CA bundle
+    set:
+      metrics:
+        serviceMonitor:
+          enabled: true
+    asserts:
+      - equal:
+          path: spec.endpoints[0].scheme
+          value: https
+      - equal:
+          path: spec.endpoints[0].bearerTokenSecret.name
+          value: RELEASE-NAME-velkir-metrics-token
+      - equal:
+          path: spec.endpoints[0].tlsConfig.ca.secret.name
+          value: velkir-webhook-ca
+
+  - it: endpoint interval + scrapeTimeout overrides are honoured
+    set:
+      metrics:
+        serviceMonitor:
+          enabled: true
+          interval: 15s
+          scrapeTimeout: 5s
+    asserts:
+      - equal:
+          path: spec.endpoints[0].interval
+          value: 15s
+      - equal:
+          path: spec.endpoints[0].scrapeTimeout
+          value: 5s
+
+  - it: additionalLabels are merged into metadata.labels
+    set:
+      metrics:
+        serviceMonitor:
+          enabled: true
+          additionalLabels:
+            prometheus: kube-prometheus
+            team: platform
+    asserts:
+      - equal:
+          path: metadata.labels.prometheus
+          value: kube-prometheus
+      - equal:
+          path: metadata.labels.team
+          value: platform

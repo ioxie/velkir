@@ -1,0 +1,11 @@
+# Issue-template chooser configuration.
+# Blank issues are disabled so reporters land on a template or the contact links below.
+# The Bug and Enhancement templates are provided separately (contribution-funnel surface).
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Report a security vulnerability (private)
+    url: https://github.com/ioxie/velkir/security/advisories/new
+    about: >-
+      Please report security vulnerabilities privately via GitHub Private
+      Vulnerability Reporting (Security advisories). Do NOT open a public issue
+      for security reports.

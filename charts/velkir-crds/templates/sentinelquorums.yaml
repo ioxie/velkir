@@ -1,0 +1,11 @@
+{{- /*
+SentinelQuorum CRD — generated from api/v1beta1/sentinelquorum_types.go.
+See the comment on valkeys.yaml for the sync convention.
+*/ -}}
+{{- if .Values.crds.create }}
+{{- $crd := .Files.Get "files/sentinelquorums.velkir.ioxie.dev.yaml" | fromYaml -}}
+{{- if .Values.crds.keep }}
+{{- $_ := set $crd.metadata "annotations" (merge (default dict $crd.metadata.annotations) (dict "helm.sh/resource-policy" "keep")) -}}
+{{- end }}
+{{ $crd | toYaml }}
+{{- end }}

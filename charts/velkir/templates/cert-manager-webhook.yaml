@@ -1,0 +1,49 @@
+{{/*
+cert-manager opt-in: provisions the webhook leaf Secret via a self-signed
+Issuer + Certificate pair. Rendered only when webhook.certManager.enabled=true.
+
+The Secret name is pinned to "velkir-webhook-cert" regardless of
+release name — this is the contract the operator's runtime detection probes
+for in CertManagerOptedIn(). Likewise the Certificate name matches the
+Secret name (cert-manager always uses spec.secretName for the produced
+Secret; the runtime detection probes the Certificate by spec.secretName as
+its lookup key).
+
+Pairs with cert-manager.io/inject-ca-from on the WebhookConfigurations so
+cert-manager's cainjector populates clientConfig.caBundle. The dynauth
+injector is skipped at operator boot when --enable-dynamic-authority=false
+is passed (deployment.yaml gates that flag on the same value).
+*/}}
+{{- if and .Values.webhook.enabled .Values.webhook.certManager.enabled -}}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "velkir.webhook.certManagerIssuerName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  # Name pinned to the operator's webhook-cert Secret name so the
+  # runtime probe (dynauth.CertManagerOptedIn) finds it regardless of
+  # the Helm release name.
+  name: velkir-webhook-cert
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+spec:
+  # SANs match dynauth.WebhookLeafSpec so the operator and cert-manager
+  # paths produce equivalent leaves: a switch from one to the other
+  # doesn't require regenerating clients that pin the SAN list.
+  dnsNames:
+    - {{ include "velkir.webhook.serviceName" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "velkir.webhook.serviceName" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    name: {{ include "velkir.webhook.certManagerIssuerName" . }}
+    kind: Issuer
+  secretName: velkir-webhook-cert
+{{- end }}

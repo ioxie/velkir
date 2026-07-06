@@ -1,0 +1,65 @@
+# ServiceMonitor alternative — for clusters whose Prometheus discovers
+# ServiceMonitors but not PodMonitors. Mirrors valkey-podmonitor.yaml: it
+# covers the Valkey data-plane (component=valkey) only. Apply EITHER the
+# data-plane PodMonitor OR this — not both, or you double every series.
+# Sentinel coverage is PodMonitor-only (sentinel-podmonitor.yaml); if you
+# need a ServiceMonitor for it, replicate this Service + ServiceMonitor
+# scoped to velkir.ioxie.dev/component: sentinel, with a static
+# valkey_role=sentinel relabeling.
+#
+# Why a companion Service: a ServiceMonitor scrapes Service endpoints,
+# but the per-CR Services the operator creates (<cr>, <cr>-ro,
+# <cr>-headless) publish only the Valkey client port (6379), not the
+# exporter's metrics port. This headless Service selects the managed pods
+# and publishes their metrics port (9121, named "metrics") so the
+# ServiceMonitor has endpoints to scrape. publishNotReadyAddresses keeps
+# scraping a pod through brief NotReady windows so metrics aren't lost
+# exactly when you need them.
+#
+# A Service only selects pods in its OWN namespace, so apply this Service
+# once in each namespace that holds Valkey CRs. The ServiceMonitor's
+# namespaceSelector.any then discovers them all. (The PodMonitor samples
+# avoid this — they select pods directly across namespaces — which is why
+# PodMonitor is the canonical path.)
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey-metrics
+  labels:
+    app: valkey-metrics
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/managed-by: velkir
+    velkir.ioxie.dev/component: valkey
+  ports:
+    - name: metrics
+      port: 9121
+      targetPort: metrics
+      protocol: TCP
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: valkey-data
+  labels:
+    release: prometheus   # set to your Prometheus's monitor-discovery label
+spec:
+  namespaceSelector:
+    any: true
+  selector:
+    matchLabels:
+      app: valkey-metrics      # selects the companion Service above
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_velkir_ioxie_dev_role]
+          targetLabel: valkey_role
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+          targetLabel: valkey_instance
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace

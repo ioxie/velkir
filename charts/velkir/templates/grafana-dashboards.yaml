@@ -1,0 +1,57 @@
+{{/*
+One ConfigMap per dashboard JSON file under
+charts/velkir/dashboards/. The Grafana sidecar provisioner
+(kube-prometheus-stack pattern) auto-discovers ConfigMaps carrying
+the configured label and loads their contents as dashboards.
+
+Gated by `dashboards.enabled` — same opt-in shape as the
+ServiceMonitor and PrometheusRule. The ConfigMaps are namespaced to
+the operator's release namespace; if your Grafana sidecar watches a
+different namespace, set `dashboards.namespace` to override.
+
+The sidecar label key/value default to the kube-prometheus-stack
+convention (`grafana_dashboard: "1"`); overridable via
+`dashboards.sidecarLabel` and `dashboards.sidecarValue` for
+deployments using a different Grafana image.
+*/}}
+{{- if .Values.dashboards.enabled -}}
+{{- $sidecarLabel := .Values.dashboards.sidecarLabel | default "grafana_dashboard" -}}
+{{- $sidecarValue := .Values.dashboards.sidecarValue | default "1" -}}
+{{- $namespace := .Values.dashboards.namespace | default .Release.Namespace -}}
+{{- /*
+Merge `dashboards.folder` shortcut into the effective annotation set.
+Explicit entries in additionalAnnotations win on key collision so a
+caller can override the shortcut without removing it.
+*/ -}}
+{{- $annotations := dict -}}
+{{- with .Values.dashboards.folder -}}
+{{- $_ := set $annotations "grafana_folder" . -}}
+{{- end -}}
+{{- with .Values.dashboards.additionalAnnotations -}}
+{{- range $k, $v := . -}}
+{{- $_ := set $annotations $k $v -}}
+{{- end -}}
+{{- end -}}
+{{- range $path, $_ := .Files.Glob "dashboards/*.json" -}}
+{{- $name := $path | base | trimSuffix ".json" -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "velkir.fullname" $ }}-dashboard-{{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "velkir.labels" $ | nindent 4 }}
+    {{ $sidecarLabel }}: {{ $sidecarValue | quote }}
+    {{- with $.Values.dashboards.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  {{ $path | base }}: |-
+{{ $.Files.Get $path | trimSuffix "\n" | indent 4 }}
+{{ end }}
+{{- end }}

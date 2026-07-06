@@ -1,0 +1,241 @@
+{{/*
+Operator Deployment. The manager binary serves three ports:
+
+  - metrics 8443 (HTTPS, signed by the in-cluster dynauth CA). The
+    operator-self ServiceMonitor scrapes this with caFile/
+    serverName for full TLS validation.
+  - healthz 8081 (HTTP, liveness/readiness probes only).
+  - webhook 9443 (HTTPS, signed by the same dynauth CA).
+
+Both TLS-serving ports load their leaf cert+key from a projected volume
+backed by the leaf Secret the dynauth Authority maintains in the operator
+namespace. controller-runtime certwatcher reloads on rotation without a
+restart.
+*/}}
+{{- include "velkir.validateValues" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "velkir.fullname" . }}
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "velkir.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the Deployment when the operator config changes so new
+        # lease timings take effect on `helm upgrade` — a ConfigMap edit
+        # alone does not restart the pod.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "velkir.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "velkir.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Disable kubelet's default token automount; the projected
+      # volume below mounts a bound token at the same path so
+      # client-go's in-cluster config keeps working, but a
+      # compromised pod can no longer rely on a long-lived legacy
+      # token sitting on disk.
+      automountServiceAccountToken: false
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- if and .Values.webhook.enabled .Values.webhook.selfSigned.enabled }}
+      # Init container that mints the dynauth CA + leaf Secrets so
+      # the main container's webhook server (which loads tls.crt at
+      # startup, not lazily on first request) has files to read.
+      # Without this the main container fatals on "open ... tls.crt:
+      # no such file or directory" — the chicken-and-egg where the
+      # periodic Authority loop that would mint those Secrets cannot
+      # run until mgr.Start has succeeded.
+      #
+      # The init re-runs the same image with --bootstrap-only set; it
+      # creates Secrets idempotently (no-op on re-install) and waits
+      # for kubelet to project the files onto the mounted volumes
+      # before exiting. Skipped in cert-manager mode (cert-manager
+      # pre-mints the Secret before the pod schedules).
+      initContainers:
+        - name: cert-bootstrap
+          image: {{ include "velkir.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          args:
+            - --bootstrap-only
+            - --webhook-cert-path=/var/lib/velkir/webhook-cert
+            - --webhook-service-name={{ include "velkir.fullname" . }}-webhook
+            - --metrics-cert-path=/var/lib/velkir/metrics-cert
+            - --metrics-service-name={{ include "velkir.metricsServiceName" . }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            # Mount the same projected volumes as the main container.
+            # Init's --bootstrap-only path waits for kubelet to
+            # project the freshly-created Secret content onto these
+            # paths before exiting, so the main container starts with
+            # the files already in place.
+            - name: webhook-cert
+              mountPath: /var/lib/velkir/webhook-cert
+              readOnly: true
+            - name: metrics-cert
+              mountPath: /var/lib/velkir/metrics-cert
+              readOnly: true
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+      {{- end }}
+      containers:
+        - name: manager
+          image: {{ include "velkir.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          args:
+            - --leader-elect={{ .Values.leaderElection.enabled }}
+            - --webhook-cert-path=/var/lib/velkir/webhook-cert
+            - --webhook-service-name={{ include "velkir.fullname" . }}-webhook
+            - --metrics-cert-path=/var/lib/velkir/metrics-cert
+            - --metrics-service-name={{ include "velkir.metricsServiceName" . }}
+            {{- if .Values.webhook.certManager.enabled }}
+            # cert-manager owns the cert lifecycle; the operator's dynauth
+            # Authority + injector are skipped at boot to avoid a two-writer
+            # race over the leaf Secret and the WebhookConfiguration's
+            # caBundle. Pairs with the cert-manager.io/inject-ca-from
+            # annotation on both WebhookConfigurations.
+            - --enable-dynamic-authority=false
+            {{- end }}
+            {{- if .Values.allowTestOverrides }}
+            # E2e-only: relaxes safety floors via VALKEY_OPERATOR_* env
+            # vars (extraEnv). NEVER set in production.
+            - --allow-test-overrides
+            {{- end }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: 8443
+              protocol: TCP
+            - name: healthz
+              containerPort: 8081
+              protocol: TCP
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: healthz
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: operator-config
+              mountPath: /etc/velkir
+              readOnly: true
+            - name: webhook-cert
+              mountPath: /var/lib/velkir/webhook-cert
+              readOnly: true
+            - name: metrics-cert
+              mountPath: /var/lib/velkir/metrics-cert
+              readOnly: true
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+      volumes:
+        # Operator config (leader-election lease timing). Mounted at the
+        # manager's --config default path; loaded at startup.
+        - name: operator-config
+          configMap:
+            name: {{ include "velkir.fullname" . }}-config
+        # Both leaf Secrets are managed by the dynauth Authority (or by
+        # cert-manager when webhook.certManager.enabled=true). optional=true
+        # lets the pod start before the Authority's first reconcile pass
+        # creates the Secret; controller-runtime's certwatcher picks the
+        # cert up the moment the kubelet projects it.
+        - name: webhook-cert
+          secret:
+            secretName: velkir-webhook-cert
+            optional: true
+        - name: metrics-cert
+          secret:
+            secretName: velkir-metrics-cert
+            optional: true
+        # Bound projected SA token + ca.crt + namespace, mounted at
+        # the conventional path that client-go's rest.InClusterConfig
+        # reads from. Replaces the kubelet's default automount (which
+        # is disabled above) with a bound, expiring token so a
+        # compromised pod can't replay a long-lived legacy token.
+        - name: kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 3607
+                  path: token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+                      path: namespace
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

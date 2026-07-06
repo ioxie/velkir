@@ -1,0 +1,108 @@
+suite: webhook namespaceSelector override
+templates:
+  - validatingwebhookconfiguration.yaml
+  - mutatingwebhookconfiguration.yaml
+tests:
+  - it: validator defaults to the NotIn exclusion of kube-system + release namespace
+    template: validatingwebhookconfiguration.yaml
+    asserts:
+      - equal:
+          path: webhooks[0].namespaceSelector.matchExpressions[0].key
+          value: kubernetes.io/metadata.name
+      - equal:
+          path: webhooks[0].namespaceSelector.matchExpressions[0].operator
+          value: NotIn
+      - contains:
+          path: webhooks[0].namespaceSelector.matchExpressions[0].values
+          content: kube-system
+      - notExists:
+          path: webhooks[0].namespaceSelector.matchLabels
+
+  - it: mutator defaults to the same NotIn exclusion shape
+    template: mutatingwebhookconfiguration.yaml
+    asserts:
+      - equal:
+          path: webhooks[0].namespaceSelector.matchExpressions[0].operator
+          value: NotIn
+      - notExists:
+          path: webhooks[0].namespaceSelector.matchLabels
+
+  - it: validator override (matchLabels) keeps the user labels and merges the kube-system exclusion
+    set:
+      webhook:
+        namespaceSelector:
+          matchLabels:
+            velkir.ioxie.dev/e2e-target: "true"
+    template: validatingwebhookconfiguration.yaml
+    asserts:
+      - equal:
+          path: webhooks[0].namespaceSelector.matchLabels["velkir.ioxie.dev/e2e-target"]
+          value: "true"
+      # The kube-system exclusion is merged in unconditionally — a
+      # failurePolicy=Fail webhook must never be able to block admission in
+      # the control-plane namespace, even under a scoped override.
+      - equal:
+          path: webhooks[0].namespaceSelector.matchExpressions[0].key
+          value: kubernetes.io/metadata.name
+      - equal:
+          path: webhooks[0].namespaceSelector.matchExpressions[0].operator
+          value: NotIn
+      - contains:
+          path: webhooks[0].namespaceSelector.matchExpressions[0].values
+          content: kube-system
+      # ...but ONLY kube-system. The release namespace is NOT force-excluded
+      # on an override, so a scoped install (e.g. e2e) may still target it.
+      - lengthEqual:
+          path: webhooks[0].namespaceSelector.matchExpressions[0].values
+          count: 1
+
+  - it: mutator override (matchLabels) keeps the user labels and merges the kube-system exclusion
+    set:
+      webhook:
+        namespaceSelector:
+          matchLabels:
+            velkir.ioxie.dev/e2e-target: "true"
+    template: mutatingwebhookconfiguration.yaml
+    asserts:
+      - equal:
+          path: webhooks[0].namespaceSelector.matchLabels["velkir.ioxie.dev/e2e-target"]
+          value: "true"
+      - contains:
+          path: webhooks[0].namespaceSelector.matchExpressions[0].values
+          content: kube-system
+
+  - it: validator override (custom matchExpressions) is preserved with the kube-system exclusion appended
+    set:
+      webhook:
+        namespaceSelector:
+          matchExpressions:
+            - key: environment
+              operator: In
+              values:
+                - staging
+                - prod
+    template: validatingwebhookconfiguration.yaml
+    asserts:
+      # The user's expression is preserved at index 0.
+      - equal:
+          path: webhooks[0].namespaceSelector.matchExpressions[0].key
+          value: environment
+      - equal:
+          path: webhooks[0].namespaceSelector.matchExpressions[0].operator
+          value: In
+      - contains:
+          path: webhooks[0].namespaceSelector.matchExpressions[0].values
+          content: prod
+      # The kube-system exclusion is appended as a second expression.
+      - lengthEqual:
+          path: webhooks[0].namespaceSelector.matchExpressions
+          count: 2
+      - equal:
+          path: webhooks[0].namespaceSelector.matchExpressions[1].key
+          value: kubernetes.io/metadata.name
+      - equal:
+          path: webhooks[0].namespaceSelector.matchExpressions[1].operator
+          value: NotIn
+      - contains:
+          path: webhooks[0].namespaceSelector.matchExpressions[1].values
+          content: kube-system

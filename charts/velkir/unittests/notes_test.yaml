@@ -1,0 +1,21 @@
+suite: NOTES.txt CRD-presence warning
+templates:
+  - NOTES.txt
+tests:
+  - it: warns when the Valkey CRDs are absent from the cluster
+    # helm-unittest's default capabilities carry no custom CRDs, so
+    # .Capabilities.APIVersions.Has "velkir.ioxie.dev/v1beta1" is false and
+    # the install-order warning renders.
+    asserts:
+      - matchRegexRaw:
+          pattern: 'Valkey CRDs \(velkir\.ioxie\.dev/v1beta1\) are not present'
+      - matchRegexRaw:
+          pattern: 'install it FIRST|install the CRD chart|velkir-crds'
+
+  - it: omits the warning when the Valkey CRD API is present
+    capabilities:
+      apiVersions:
+        - velkir.ioxie.dev/v1beta1
+    asserts:
+      - notMatchRegexRaw:
+          pattern: 'are not present in'

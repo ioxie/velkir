@@ -1,0 +1,440 @@
+{{/*
+Full PrometheusRule pack for the operator and the managed Valkey
+data-plane. Three alert groups:
+
+  - valkey-data-plane: scraped from the redis_exporter sidecar in each
+    Valkey pod (data + sentinel exporters share the same metric prefix
+    `redis_*`). Fires on broken replication, replication lag, memory
+    pressure, evictions, and connection rejections — the failure shapes
+    a Valkey operator can't fix from the control plane and that need a
+    human looking at the cluster.
+  - valkey-sentinel-plane: same scrape source as data-plane (the
+    sentinel pods run their own redis_exporter against the sentinel
+    socket), but the metrics it surfaces are sentinel-specific
+    (`redis_sentinel_*`). Tilt mode and quorum loss are catastrophic;
+    they alert critical with a fast `for:` window.
+  - velkir: scraped from the operator's own /metrics endpoint
+    (the operator emits the `valkey_*` metric family). Fires on
+    operator-side conditions — reconcile error rate, slow reconciles,
+    workqueue backlog, stuck rollouts, Degraded/Available CR phases,
+    split-brain detection, webhook latency, cert expiry.
+
+The `velkir` group references metrics emitted by future
+stages (`valkey_resource_state{condition_type=...}` from the status
+subresource exposure stage; `valkey_split_brain_detections_total` and
+`valkey_webhook_request_duration_seconds_bucket` from the sentinel and
+webhook-instrumentation stages). Those alerts evaluate to no-data
+until the underlying metric is emitted; the rule lands now so the
+catalog is in place when the metrics light up.
+
+Gated by metrics.prometheusRule.enabled — same shape as the
+ServiceMonitor.
+*/}}
+{{- if .Values.metrics.prometheusRule.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "velkir.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: valkey-data-plane
+      interval: 30s
+      rules:
+        - alert: ValkeyReplicaDown
+          expr: |
+            kube_pod_status_ready{condition="true"}
+              * on(pod) group_left(valkey_instance)
+                kube_pod_labels{label_app_kubernetes_io_managed_by="velkir",
+                                label_velkir_ioxie_dev_component="valkey"}
+            == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Valkey pod not Ready for 5m"
+            description: |
+              {{`{{ $labels.namespace }}/{{ $labels.pod }}`}} has been NotReady for 5 minutes.
+              Check `kubectl describe pod` and the operator's reconcile loop.
+        - alert: ValkeyReplicationBroken
+          # last_over_time caps the staleness horizon: a deleted pod's
+          # final link-down samples stay matchable to an instant selector
+          # for the full 5m lookback, so a torn-down cluster could page
+          # this alert minutes into its replacement's clean bootstrap.
+          # With [1m] a dead series can match for at most ~2m (final
+          # scraped samples + range), which is below the 3m for-duration;
+          # a LIVE broken replica (30s scrape) matches exactly as before.
+          expr: last_over_time(redis_master_link_up{valkey_role="replica"}[1m]) == 0
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Replica {{`{{ $labels.pod }}`}} has master_link_status=down"
+            description: |
+              Replica in {{`{{ $labels.namespace }}`}} has lost its link to the master for
+              >3m. Replication is broken — manual intervention may be needed once the
+              operator's automated recovery has had a chance.
+        - alert: ValkeyReplicationLagHigh
+          expr: |
+            (redis_master_repl_offset{valkey_role="primary"} -
+              on(valkey_instance, namespace) group_right
+             redis_slave_repl_offset{valkey_role="replica"}) > 1e8
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Replication lag > 100MB on {{`{{ $labels.pod }}`}}"
+            description: |
+              Replica {{`{{ $labels.pod }}`}} is more than 100MB behind master. Likely
+              causes: network congestion, replica IO saturation, replica CPU
+              starvation. Check the replica's `redis_io_threads_active_total` and
+              network metrics.
+        - alert: ValkeyHighMemory
+          expr: |
+            (redis_used_memory_bytes
+              / ignoring(valkey_role)
+                (redis_memory_max_bytes > 0)
+            ) > 0.8
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Valkey memory > 80% of maxmemory"
+            description: |
+              {{`{{ $labels.namespace }}/{{ $labels.pod }}`}} is using >80% of configured
+              maxmemory for 10 minutes. Scale the CR's resources or tune the
+              maxmemory-policy before evictions start affecting the workload.
+        - alert: ValkeyEvictionsOccurring
+          expr: rate(redis_evicted_keys_total[5m]) > 1
+          for: 10m
+          labels:
+            severity: info
+          annotations:
+            summary: "Valkey evicting keys"
+            description: |
+              {{`{{ $labels.pod }}`}} is evicting keys at >1/s for 10 minutes. The
+              maxmemory policy is active; verify this is the intended behaviour
+              (cache workloads expect this; database workloads usually don't).
+        - alert: ValkeyRejectedConnections
+          expr: rate(redis_rejected_connections_total[5m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Valkey rejecting connections (maxclients hit)"
+            description: |
+              {{`{{ $labels.pod }}`}} is rejecting connections because the maxclients
+              limit has been reached. Raise `maxclients` on the CR or find the
+              client-side connection leak.
+    - name: valkey-sentinel-plane
+      interval: 30s
+      rules:
+        - alert: ValkeySentinelTiltMode
+          expr: redis_sentinel_tilt == 1
+          for: 60s
+          labels:
+            severity: critical
+          annotations:
+            summary: "Sentinel {{`{{ $labels.pod }}`}} is in tilt mode"
+            description: |
+              Sentinel {{`{{ $labels.pod }}`}} has been in tilt for >60s. While tilted,
+              the sentinel will not initiate failovers — the cluster is unprotected
+              until the tilt clears. Common causes: CPU starvation, clock skew,
+              getaddrinfo stalls.
+        - alert: ValkeyQuorumLost
+          # Strict-majority threshold: alert when count_OK < (n+1)/2, where n
+          # is the total sentinel count for the cluster. The +1 is INSIDE the
+          # division so the threshold lands on an integer for odd n (n=3 → 2,
+          # n=5 → 3) — a `n/2 + 1` shape gives non-integer thresholds and
+          # false-positives at the majority boundary (e.g. count_OK=2 of 3
+          # would have alerted under 3/2+1 = 2.5 even though 2 IS majority).
+          expr: |
+            sum by (valkey_instance, namespace) (redis_sentinel_master_status == 1)
+              <
+            on(valkey_instance, namespace) (
+              (sum by (valkey_instance, namespace) (redis_sentinel_tilt * 0 + 1) + 1)
+                / 2
+            )
+          for: 60s
+          labels:
+            severity: critical
+          annotations:
+            summary: "Sentinel quorum lost for {{`{{ $labels.valkey_instance }}`}}"
+            description: |
+              Fewer than majority sentinels report master OK for
+              {{`{{ $labels.valkey_instance }}`}}. Failover is not possible until quorum
+              recovers. Check sentinel pod health and inter-pod network.
+        - alert: ValkeySentinelScriptsRunning
+          expr: redis_sentinel_running_scripts > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Sentinel running notification scripts"
+            description: |
+              The operator does not configure sentinel notification scripts. If this
+              fires, an out-of-band configuration change has set them — investigate
+              before they affect failover decisions.
+    - name: velkir
+      interval: 30s
+      rules:
+        - alert: ValkeyOperatorReconcileErrors
+          # Operator-emitted counter (#213 wired the emit at every err
+          # return from Reconcile, with a coarse classified `reason`
+          # label). Sum across reasons gives the total failure rate;
+          # the threshold is the same 0.1/sec that worked against
+          # controller_runtime_reconcile_errors_total — both surface
+          # the same per-controller failure shape, just from different
+          # vantage points.
+          expr: |
+            sum (
+              rate(valkey_reconciliations_failed_total{job="{{ include "velkir.metricsServiceName" . }}"}[10m])
+            ) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Valkey operator reconcile-error rate elevated"
+            description: |
+              The velkir operator has been returning reconcile errors at
+              {{`{{ $value | printf "%.3f" }}`}} errors/sec for the past 10 minutes.
+              Check `valkey_reconciliations_failed_total` by `reason` label
+              and the operator pod logs for stuck reconciles.
+        - alert: ValkeyOperatorReconcileLongDuration
+          # controller-runtime's built-in per-controller reconcile-time
+          # histogram (carries the `controller` label this rule groups by).
+          expr: |
+            histogram_quantile(0.99,
+              sum by (controller, le) (
+                rate(controller_runtime_reconcile_time_seconds_bucket{job="{{ include "velkir.metricsServiceName" . }}"}[10m])
+              )
+            ) > 30
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Valkey operator reconcile p99 > 30s"
+            description: |
+              Reconciles for {{`{{ $labels.controller }}`}} are taking >30s at p99.
+              Expected <2s; investigate watches and blocking calls.
+        - alert: ValkeyOperatorWorkqueueBacklog
+          expr: |
+            avg_over_time(workqueue_depth{job="{{ include "velkir.metricsServiceName" . }}", name=~"valkey.*"}[10m]) > 50
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Valkey operator workqueue backlog growing"
+            description: |
+              Workqueue {{`{{ $labels.name }}`}} has averaged {{`{{ $value | printf "%.1f" }}`}} items
+              over the past 10 minutes. The operator may be unable to keep up with
+              the rate of CR mutations — check for slow reconciles or stuck
+              dependencies.
+        - alert: ValkeyMasterAwareRolloutStuck
+          expr: |
+            valkey_resource_state{condition_type="MasterAwareRolloutInProgress", status="True"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Master-aware rollout running >10m"
+            description: |
+              CR {{`{{ $labels.namespace }}/{{ $labels.name }}`}} has a rolling update in
+              progress for >10m. Check the CR's status conditions and the operator
+              pod logs for the stuck phase.
+        - alert: ValkeyPhaseDegraded
+          expr: valkey_resource_state{condition_type="Degraded", status="True"} == 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Valkey CR in Degraded state"
+            description: |
+              CR {{`{{ $labels.namespace }}/{{ $labels.name }}`}} has Degraded=True for >5m.
+              Inspect the CR's `status.conditions` for the specific reason.
+        - alert: ValkeySplitBrainDetected
+          # Sustained-seconds gauge fires only when sentinel
+          # disagreement (operator's GET-MASTER-ADDR-BY-NAME probe sees
+          # divergent answers, or no quorum agreement) has persisted past
+          # the bootstrap window. Transient first-deploy / operator-
+          # restart blips (which auto-resolve within seconds) no longer
+          # page; sustained wedges still do.
+          expr: valkey_split_brain_sustained_seconds > 60
+          for: 30s
+          labels:
+            severity: critical
+          annotations:
+            summary: "Sustained sentinel disagreement on master for {{`{{ $labels.namespace }}/{{ $labels.name }}`}}"
+            description: |
+              The operator observed sustained disagreement among sentinels
+              on GET-MASTER-ADDR-BY-NAME (or unreachable-quorum) for
+              {{`{{ $labels.namespace }}/{{ $labels.name }}`}}
+              past the bootstrap-grace window (60s). Role-label writes are
+              suppressed until consensus is restored.
+
+              Possible causes: master pod recreated with a new IP while
+              one or more sentinels hold a stale peer-list or stale
+              master pointer; network partition between sentinels; a
+              sentinel pod replaced during an operator-down window so
+              the per-reconcile pod-UID tracker missed the replacement.
+
+              The operator's per-reconcile stranded-sentinel detector
+              fires REMOVE + MONITOR automatically against sentinels with
+              empty peer-lists, backing off exponentially per sentinel
+              address when repeated surgeries make no progress (a provably
+              stuck sentinel surfaces as a SentinelPeerLinkupStuck event
+              and Degraded reason). If this alert persists past the
+              operator's recovery window, check the SentinelStrandedRecovery /
+              SentinelPeerLinkupStuck event stream on the Valkey CR and
+              the operator pod logs.
+        - alert: ValkeyDualMasterObserved
+          # The operator's dual-master scan saw two or more pods
+          # self-reporting role:master — active data divergence: writes
+          # are landing on more than one primary, and the eventual
+          # loser's diverging writes will be discarded by the resync
+          # that resolves the split. The gauge is level-based (1 while
+          # the last scan saw the split, 0 once a scan sees it
+          # resolved); the short `for` only absorbs a scan racing an
+          # in-flight demotion, not real splits.
+          expr: valkey_dual_master_observed > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Multiple valkey masters accepting writes for {{`{{ $labels.namespace }}/{{ $labels.name }}`}}"
+            description: |
+              Two or more valkey pods of
+              {{`{{ $labels.namespace }}/{{ $labels.name }}`}} self-report
+              role:master. Inside an operator failover section the bounded
+              self-heal demotes the loser automatically; outside one the
+              operator refuses unfenced demotion and only surfaces the
+              split — this alert firing for more than a few minutes means
+              manual resolution is required.
+
+              Check the DualMasterObserved / DualMasterSelfHeal* event
+              stream on the Valkey CR for the pod names and their
+              master_repl_offsets, pick the survivor (highest offset
+              unless application knowledge says otherwise), and demote
+              the other master(s) via REPLICAOF <survivor-ip> 6379.
+        - alert: ValkeySentinelTopologyMismatch
+          # Hygiene signal, deliberately decoupled from the incident
+          # alerts above: the operator sets this per-dimension deficit
+          # gauge only after its own 60s sustained-mismatch debounce,
+          # holds it at 0 (never stale) while in spec, yields it during
+          # rollouts / failovers / quorum suppression, and expires it
+          # when the observation goes stale — a non-zero value is
+          # already a debounced fact. The generous `for:` keeps routine
+          # sentinel or replica pod replacement (which can take minutes
+          # to re-gossip) from paging; a deficit surviving 15m of
+          # continuously eligible observation is a topology that is not
+          # converging on its own.
+          expr: valkey_sentinel_topology_mismatch > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Sentinel-known topology below spec for {{`{{ $labels.namespace }}/{{ $labels.name }}`}} ({{`{{ $labels.dimension }}`}})"
+            description: |
+              The sentinels of {{`{{ $labels.namespace }}/{{ $labels.name }}`}}
+              have reported fewer {{`{{ $labels.dimension }}`}} than spec
+              (short by {{`{{ $value | printf "%.0f" }}`}}) for a sustained
+              window. This is a hygiene signal decoupled from the incident
+              ladder — quorum loss and split-brain page through their own
+              critical alerts — but the deployment is carrying less
+              redundancy than requested, so a failover would have fewer
+              voters or promotion candidates than intended.
+
+              Typical causes: a sentinel that never rejoined gossip after
+              pod replacement (its peers hold a stale peer-list), or a
+              replica missing from every sentinel's num-slaves view.
+              Check the SentinelTopologyMismatch event stream and the
+              SentinelTopologyReconciled condition on the Valkey CR. If
+              SentinelPeerLinkupStuck events or a Degraded condition fire
+              alongside, follow those first — they name the stuck pod.
+        - alert: ValkeyMasterInfoTimeout
+          # Operator's INFO-replication probe of the labelled-primary
+          # pod has been failing (timeout / malformed) for >30s
+          # continuously. The signature is "TCP up, valkey-server
+          # unresponsive" — frozen process (SIGSTOP'd, cgroup-frozen,
+          # kernel stall). The chart's exec liveness probe should
+          # restart the container within ~60s of the freeze starting;
+          # this alert fires when that recovery path doesn't engage.
+          expr: valkey_master_info_replication_timeout_seconds > 30
+          for: 60s
+          labels:
+            severity: critical
+          annotations:
+            summary: "Valkey master unresponsive (frozen process) for {{`{{ $labels.namespace }}/{{ $labels.name }}`}}"
+            description: |
+              The operator's INFO replication probe of the labelled-primary
+              pod in {{`{{ $labels.namespace }}/{{ $labels.name }}`}} has
+              been timing out for >30s continuously. This indicates the
+              valkey-server process is not responding to commands despite
+              the TCP socket being open — the canonical frozen-process
+              signature (SIGSTOP, cgroup-freezer, kernel stall).
+
+              The chart's exec liveness probe should detect this and let
+              kubelet restart the container within ~60s. If this alert
+              persists past that window, the liveness probe itself may
+              be failing (e.g., wrong auth password, exec probe disabled
+              via custom override, valkey-cli binary missing in the
+              container image). Check the pod's RestartCount, the
+              liveness probe configuration on the StatefulSet, and the
+              operator logs for any related events.
+        - alert: ValkeyMissingFromCluster
+          expr: |
+            valkey_resource_state{condition_type="Available", status="False"} == 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Valkey CR unavailable"
+            description: |
+              CR {{`{{ $labels.namespace }}/{{ $labels.name }}`}} has Available=False for >5m.
+              The data-plane is not serving requests; check the CR's status
+              conditions and operator logs.
+        - alert: ValkeyWebhookLatencyHigh
+          # Operator-emitted histogram (#213 wired the observe at every
+          # CustomDefaulter.Default / CustomValidator.Validate* round-trip).
+          # Threshold tightened from 5s (apiserver-side, near the 10s
+          # apiserver-timeout floor) to 0.1s — the operator-side
+          # measurement excludes apiserver→webhook network latency, so
+          # the alert fires on operator-budget anomalies (~50× tighter).
+          expr: |
+            histogram_quantile(0.99,
+              sum by (le, webhook) (
+                rate(valkey_webhook_request_duration_seconds_bucket{job="{{ include "velkir.metricsServiceName" . }}"}[5m])
+              )
+            ) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Valkey admission webhook operator-side p99 latency elevated"
+            description: |
+              p99 operator-side admission latency for webhook
+              {{`{{ $labels.webhook }}`}} is {{`{{ $value | printf "%.3f" }}`}}s
+              (alerting at >0.1s, operator-budget threshold). The apiserver
+              has a 10s timeout per webhook call but the operator-side
+              budget should stay well under that — investigate the webhook
+              server's request handling for blocking work.
+        - alert: ValkeyCertExpiringSoon
+          expr: valkey_cert_expiry_seconds < 1209600   # 14d
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Webhook cert expiring in <14 days"
+            description: |
+              {{`{{ $labels.kind }}`}} cert expires in {{`{{ $value }}`}} seconds. The dynamic
+              cert authority should rotate before expiry; investigate why it
+              hasn't. The validating webhook is failurePolicy: Fail, so a leaf
+              that reaches expiry blocks every Valkey create/update
+              cluster-wide — treat a firing alert as a pending availability
+              incident, not just cert hygiene.
+{{- end }}

@@ -1,0 +1,215 @@
+# values.yaml — skeleton. Full surface lands with the chart's values surface.
+# Every key here must be echoed in values.schema.json.
+
+replicas: 1
+
+image:
+  repository: ghcr.io/ioxie/velkir/manager
+  tag: ""          # empty → fall back to .Chart.AppVersion
+  # When set, the helper renders <repository>:<tag>@<digest> so the
+  # cluster pulls the exact bytes the operator was signed against.
+  # Required for cosign / Kyverno image-policy verification that
+  # binds by digest. Leave empty to pull by tag only.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+# imagePullSecrets is an array of corev1.LocalObjectReference. Set when
+# the operator image lives in a private registry that requires auth
+# (e.g. the in-house Harbor) and the cluster has no cluster-wide
+# pull-secret injector. Each entry's referenced Secret must exist in
+# the operator's release namespace and carry a kubernetes.io/dockerconfigjson
+# payload. Leave empty when an in-cluster mutator (Kyverno) attaches
+# the pull-secret at admission time.
+imagePullSecrets: []
+
+# PSA `restricted`-compliant defaults. The operator container runs
+# as the non-root user UID 65532 baked into the Dockerfile and needs
+# no capabilities, no writable root filesystem, and no privilege
+# escalation. Override only if your cluster has stricter
+# requirements (e.g. additional seccomp profiles).
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
+# Namespaces the operator observes and reconciles. Empty (the default)
+# means cluster-scoped: every namespace. When set, the manager's cache
+# and reconcilers are confined to the listed namespaces — include the
+# release namespace itself (webhook/metrics cert Secrets and the
+# leader-election lease live there). Used by the e2e harness so a
+# per-run operator never touches another install's CRs; production
+# installs normally leave this empty.
+watchNamespaces: []
+
+leaderElection:
+  enabled: true
+  # Lease timing, rendered into the mounted operator config. Defaults are
+  # latency-tolerant: a transient API-server slowdown must not make the
+  # manager miss its renew deadline, lose the lease, and restart — on a
+  # single-replica install that restart is pure downtime with no failover
+  # benefit. Tighten these only when running multiple replicas where a
+  # standby should take over faster than blip-tolerance buys.
+  # Invariant: retryPeriod < renewDeadline < leaseDuration.
+  leaseDuration: 30s
+  renewDeadline: 20s
+  retryPeriod: 4s
+  # Release the lease on graceful shutdown so a standby takes over in <1s
+  # rather than waiting out leaseDuration.
+  releaseOnCancel: true
+
+metrics:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    additionalLabels: {}
+  prometheusRule:
+    enabled: false
+    additionalLabels: {}
+
+webhook:
+  # Must stay true: the manager serves the admission webhook on :9443
+  # unconditionally and it enforces the timing-floor, IP-only addressing,
+  # and masterName-immutability invariants. Setting this false fails the
+  # render (see velkir.validateValues) rather than ship a
+  # half-configured install with admission validation silently off.
+  enabled: true
+  # The webhook serving cert comes from exactly ONE of two sources;
+  # values.schema.json requires exactly one of the two `enabled` flags
+  # to be true. Both true races two CABundle injectors over the webhook
+  # configuration; both false leaves the server with no cert to load.
+  # selfSigned.enabled drives the operator's built-in dynauth path (an
+  # init container mints the CA + leaf Secrets at boot); certManager.enabled
+  # hands the cert lifecycle to cert-manager. Switch sources by flipping
+  # both flags together, e.g.:
+  #   --set webhook.certManager.enabled=true,webhook.selfSigned.enabled=false
+  certManager:
+    enabled: false
+  selfSigned:
+    enabled: true
+  # Override the namespaceSelector applied to both Mutating +
+  # Validating WebhookConfigurations. Empty (default) keeps the
+  # safe behaviour: a NotIn exclusion of kube-system and the
+  # operator's own namespace, so a webhook-down window can't lock
+  # up CRs the operator itself might create. Populate with a
+  # matchLabels or matchExpressions block to target a specific
+  # subset of namespaces — useful for shared-cluster e2e where
+  # the test wants the operator's webhooks to fire ONLY on a
+  # labelled e2e namespace and never on production namespaces
+  # served by a separate install. The override replaces the default
+  # exclusion list, with ONE exception: the kube-system exclusion is
+  # always merged in (a failurePolicy=Fail webhook must never be able
+  # to block admission in the control-plane namespace). The release
+  # namespace is NOT force-excluded on an override, so a scoped install
+  # may still target it.
+  namespaceSelector: {}
+
+networkPolicy:
+  # Default-on: ships an operator-self NetworkPolicy that bounds
+  # ingress to the webhook / metrics / healthz ports and pairs with
+  # the operator's cluster-wide secret-read RBAC by isolating egress
+  # at the network layer. Set to false in environments that manage
+  # NetworkPolicy externally (e.g. cluster-wide default-deny mesh,
+  # Cilium policies provisioned out-of-chart).
+  enabled: true
+  # TCP ports the egress rule allows to the Kubernetes apiserver.
+  # Covers the common in-cluster kubernetes.default.svc (443) and the
+  # kubeadm/kubelet (6443) endpoints. Override when your apiserver
+  # answers on a non-standard port (e.g. a managed control plane on
+  # 8443) — otherwise the enumerated egress drops control-plane
+  # traffic and the operator wedges on every apiserver round-trip.
+  apiServerPorts:
+    - 443
+    - 6443
+  # Optional source restrictions for the webhook (9443) and metrics
+  # (8443) ingress ports. Empty (default) leaves each port reachable
+  # from anywhere in the cluster — the apiserver dials the webhook from
+  # an unpredictable source IP and scrapers may live in any namespace,
+  # so a blanket allow is the safe default. Hardened installs narrow:
+  # set webhookFrom to the apiserver / control-plane peers and
+  # metricsFrom to the monitoring namespace. Each is a list of
+  # NetworkPolicyPeer objects (namespaceSelector / podSelector / ipBlock),
+  # rendered verbatim into the rule's `from:`. The healthz port (8081)
+  # is always open — kubelet probes originate from the node IP, which a
+  # peer selector can't reliably match. Example:
+  #   metricsFrom:
+  #     - namespaceSelector:
+  #         matchLabels:
+  #           kubernetes.io/metadata.name: monitoring
+  webhookFrom: []
+  metricsFrom: []
+
+# Grafana dashboards shipped as ConfigMaps with the Grafana sidecar
+# discovery label (kube-prometheus-stack convention). Three dashboards:
+# valkey-fleet-overview, valkey-single-deployment, velkir.
+# Opt-in to avoid colliding with operators who manage their dashboard
+# catalog out-of-chart.
+dashboards:
+  enabled: false
+  # Sidecar label / value the Grafana installation watches for
+  # auto-discovery. Default matches kube-prometheus-stack.
+  sidecarLabel: grafana_dashboard
+  sidecarValue: "1"
+  # Override if the Grafana sidecar watches a namespace other than
+  # the operator's release namespace. Empty = release namespace.
+  namespace: ""
+  additionalLabels: {}
+  # additionalAnnotations applies arbitrary annotations to every
+  # dashboard ConfigMap. The Grafana sidecar reads metadata
+  # annotations (e.g. `grafana_folder` to file dashboards into a
+  # specific folder, `grafana_dashboard_url` to set a stable URL).
+  # Use the `folder` shortcut below for the common folder-pinning
+  # case; reach for the map form when you need multiple annotations
+  # or non-folder keys.
+  additionalAnnotations: {}
+  # folder is a shortcut for `additionalAnnotations.grafana_folder`.
+  # When non-empty, the chart stamps `grafana_folder: <value>` on
+  # every dashboard ConfigMap so the Grafana sidecar files them
+  # under that folder. Empty value (default) leaves dashboards at
+  # Grafana's root level. Explicit entries in additionalAnnotations
+  # win on key collision.
+  folder: ""
+
+# allowTestOverrides surfaces the operator's `--allow-test-overrides`
+# flag. When true the manager parses VALKEY_OPERATOR_* env vars (set
+# via extraEnv below) that relax safety floors — quorum-loss
+# suppression, Phase 11 timeout, dynauth Authority's 1h rotation
+# floor, sentinel observer poll cadence. NEVER set true in
+# production: the floors prevent stuck rollouts and clock-skew
+# loop-spin. E2e harness use only.
+allowTestOverrides: false
+
+# extraEnv appends env entries to the manager container after the
+# hard-coded POD_NAMESPACE. Use to inject test-override values when
+# allowTestOverrides is true. Each entry is a standard
+# corev1.EnvVar (name + value, or name + valueFrom).
+extraEnv: []

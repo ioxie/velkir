@@ -1,0 +1,56 @@
+{{/*
+MutatingWebhookConfiguration — the defaulting webhook.
+caBundle is left empty here; the DynamicAuthority injector
+populates it on operator startup, keyed off the
+`velkir.ioxie.dev/inject-ca: "true"` label below.
+failurePolicy=Ignore matches the source-of-truth marker on the
+defaulter (defaults are nice-to-have; cert-rotation hiccups must not
+block CR CRUD).
+*/}}
+{{- if .Values.webhook.enabled -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ include "velkir.fullname" . }}-defaulter
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+    velkir.ioxie.dev/inject-ca: "true"
+  {{- if .Values.webhook.certManager.enabled }}
+  annotations:
+    # cert-manager's cainjector watches this annotation and patches the
+    # webhook's clientConfig.caBundle with the CA from the named
+    # Certificate's spec.secretName Secret. The dynauth injector path is
+    # skipped at operator boot when webhook.certManager.enabled=true, so
+    # this annotation is the only CA-bundle wiring in cert-manager mode.
+    cert-manager.io/inject-ca-from: {{ printf "%s/velkir-webhook-cert" .Release.Namespace | quote }}
+  {{- end }}
+webhooks:
+  - name: mvalkey-v1beta1.kb.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    # 5s — defaulter is a pure Go transform on the in-memory object
+    # (no API calls, no cluster lookups), so couldn't take this long
+    # on a healthy operator. Tighter than the apiserver's 10s default
+    # so a stalled webhook fails over to schema-default behaviour
+    # faster.
+    timeoutSeconds: 5
+    # Exclude the operator's own namespace and kube-system so a
+    # webhook-down window (cert rotation, leader handover,
+    # bootstrap) doesn't lock up CRs that might exist for self-test
+    # or operator-co-located deployments. A webhook.namespaceSelector
+    # override scopes the rest but always keeps the kube-system
+    # exclusion (see the shared helper for why).
+    namespaceSelector:
+      {{- include "velkir.webhookNamespaceSelector" . | nindent 6 }}
+    clientConfig:
+      service:
+        name: {{ include "velkir.fullname" . }}-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /mutate-velkir-ioxie-dev-v1beta1-valkey
+    rules:
+      - apiGroups: ["velkir.ioxie.dev"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["valkeys"]
+{{- end }}

@@ -1,0 +1,39 @@
+# Sentinel-plane PodMonitor — scrapes the exporter on managed sentinel
+# pods (plain HTTP /metrics on the container port named "metrics").
+#
+# Load-bearing: this is the only sample that covers the sentinel plane.
+# The per-CR PodMonitor the operator can render
+# (spec.metrics.podMonitor.enabled) covers the Valkey data-plane only, so
+# sentinel metrics are scraped exclusively through this sample.
+#
+# The relabelings lift the CR identity onto every redis_sentinel_* series
+# so the sentinel alerts in prometheusrule.yaml — which group by
+# valkey_instance / namespace — resolve, and stamp valkey_role=sentinel to
+# match the label convention the data-plane samples use.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: valkey-sentinel
+  labels:
+    release: prometheus   # set to your Prometheus's monitor-discovery label
+spec:
+  namespaceSelector:
+    any: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/managed-by: velkir
+      velkir.ioxie.dev/component: sentinel
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+          targetLabel: valkey_instance
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        # Sentinel pods carry no primary/replica role label; stamp the
+        # role statically so sentinel series match the documented
+        # valkey_role={primary|replica|sentinel} convention.
+        - targetLabel: valkey_role
+          replacement: sentinel

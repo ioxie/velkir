@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velkir.ioxie.dev/schemas/velkir/values.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["replicas", "image"],
+  "properties": {
+    "replicas": { "type": "integer", "minimum": 1, "maximum": 10 },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository"],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[^:@]+$" },
+        "tag":        { "type": "string" },
+        "digest":     { "type": "string", "pattern": "^(sha256:[a-f0-9]{64})?$" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": {
+          "type": "object",
+          "additionalProperties": {
+            "type": ["string", "integer"],
+            "$comment": "Kubernetes resource.Quantity: a number with an optional suffix that is exactly one of a decimal SI factor (n/u/m/k/M/G/T/P/E), a binary SI factor (Ki/Mi/Gi/Ti/Pi/Ei), or a decimal exponent (e/E[+-]N). The three branches are mutually exclusive, so a trailing digit after a suffix (1Gi2, 100m3) and a typo'd suffix (128MiB) are rejected here at render rather than slipping through to a kubectl apply error.",
+            "pattern": "^[+-]?[0-9.]+(([eE][+-]?[0-9]+)|([numkMGTPE])|([KMGTPE]i))?$"
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": {
+            "type": ["string", "integer"],
+            "pattern": "^[+-]?[0-9.]+(([eE][+-]?[0-9]+)|([numkMGTPE])|([KMGTPE]i))?$"
+          }
+        }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create":      { "type": "boolean" },
+        "name":        { "type": "string" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "podAnnotations":            { "type": "object" },
+    "podLabels":                 { "type": "object" },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": { "name": { "type": "string" } }
+      }
+    },
+    "podSecurityContext":        { "type": "object" },
+    "securityContext":           { "type": "object" },
+    "nodeSelector":              { "type": "object" },
+    "tolerations":               { "type": "array" },
+    "affinity":                  { "type": "object" },
+    "topologySpreadConstraints": { "type": "array" },
+    "priorityClassName":         { "type": "string" },
+    "watchNamespaces": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "leaderElection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":         { "type": "boolean" },
+        "leaseDuration":   { "type": "string" },
+        "renewDeadline":   { "type": "string" },
+        "retryPeriod":     { "type": "string" },
+        "releaseOnCancel": { "type": "boolean" }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "serviceMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled":          { "type": "boolean" },
+            "interval":         { "type": "string" },
+            "scrapeTimeout":    { "type": "string" },
+            "additionalLabels": { "type": "object" }
+          }
+        },
+        "prometheusRule": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled":          { "type": "boolean" },
+            "additionalLabels": { "type": "object" }
+          }
+        }
+      }
+    },
+    "webhook": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Exactly one of certManager.enabled / selfSigned.enabled must be true (enforced by the oneOf below). Both true races two CABundle injectors over the webhook configuration; both false leaves the webhook server with no serving cert.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "certManager": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
+        "selfSigned": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
+        "namespaceSelector": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "matchLabels":      { "type": "object" },
+            "matchExpressions": { "type": "array" }
+          }
+        }
+      },
+      "oneOf": [
+        {
+          "title": "self-signed: operator dynauth mints the webhook cert",
+          "properties": {
+            "selfSigned": {
+              "type": "object",
+              "required": ["enabled"],
+              "properties": { "enabled": { "const": true } }
+            }
+          },
+          "required": ["selfSigned"]
+        },
+        {
+          "title": "cert-manager owns the webhook cert lifecycle",
+          "properties": {
+            "certManager": {
+              "type": "object",
+              "required": ["enabled"],
+              "properties": { "enabled": { "const": true } }
+            }
+          },
+          "required": ["certManager"]
+        }
+      ]
+    },
+    "dashboards": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":               { "type": "boolean" },
+        "sidecarLabel":          { "type": "string" },
+        "sidecarValue":          { "type": "string" },
+        "namespace":             { "type": "string" },
+        "additionalLabels":      {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "additionalAnnotations": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "folder":                { "type": "string" }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "apiServerPorts": {
+          "type": "array",
+          "description": "TCP ports the operator's egress NetworkPolicy allows to the Kubernetes apiserver. Defaults to [443, 6443]. Set this when your apiserver is reachable on a non-standard port, otherwise control-plane egress is dropped and the operator wedges. Must be non-empty: an empty list renders an egress rule with null ports and no peer selector, which NetworkPolicy interprets as allow-all egress.",
+          "minItems": 1,
+          "items": { "type": "integer", "minimum": 1, "maximum": 65535 }
+        },
+        "webhookFrom": {
+          "type": "array",
+          "description": "Optional NetworkPolicyPeer list restricting the source of webhook (9443) ingress. Empty (default) allows from anywhere.",
+          "items": { "type": "object" }
+        },
+        "metricsFrom": {
+          "type": "array",
+          "description": "Optional NetworkPolicyPeer list restricting the source of metrics (8443) ingress. Empty (default) allows from anywhere.",
+          "items": { "type": "object" }
+        }
+      }
+    },
+    "allowTestOverrides": { "type": "boolean" },
+    "extraEnv": {
+      "type": "array",
+      "items": { "type": "object" }
+    }
+  }
+}

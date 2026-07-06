@@ -1,0 +1,38 @@
+{{/*
+Operator Service exposing the webhook (9443) and metrics (8443 secure /
+8080 plain) endpoints. The webhook server name matches the SAN baked
+into the leaf certificate by the DynamicAuthority injector.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "velkir.fullname" . }}-webhook
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "velkir.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: webhook
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "velkir.metricsServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "velkir.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 8443
+      targetPort: metrics
+      protocol: TCP

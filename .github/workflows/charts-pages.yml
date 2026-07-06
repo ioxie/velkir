@@ -1,0 +1,128 @@
+# Classic Helm-repo publish (chart-v* tag): after the OCI charts for the
+# same tag are live in GHCR (release-chart.yml), package
+# charts/velkir-crds and charts/velkir with chart-releaser and publish
+# them to the gh-pages branch with a regenerated index.yaml, so
+# `helm repo add` consumers track the same releases the OCI registry
+# serves.
+#
+# Ordering: the OCI push lives in a separate workflow and workflows have
+# no cross-workflow `needs`, so the ordering is enforced here — the
+# oci-published gate job polls GHCR until both charts are pullable at
+# the tag's version and fails closed when the retry budget is spent; the
+# publish job runs strictly after that gate. The classic index therefore
+# never lists a chart version that is not also pullable from GHCR.
+#
+# Publishing is guarded on the canonical repository, so a fork carrying
+# this workflow cannot publish artifacts.
+name: charts-pages
+
+on:
+  push:
+    tags:
+      - 'chart-v*'
+
+# Read-only by default; the publish job elevates only contents: write
+# (gh-pages push + chart release upload) — least privilege.
+permissions:
+  contents: read
+
+# Serialize runs per tag; never cancel an in-flight publish — an
+# interrupted run could leave a half-updated helm-repo index on
+# gh-pages.
+concurrency:
+  group: charts-pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Ordering gate for the cross-workflow dependency: succeeds only once
+  # release-chart.yml has pushed BOTH charts for this tag to GHCR. On a
+  # fork this job is skipped, which also skips the dependent publish job.
+  oci-published:
+    if: github.repository == 'ioxie/velkir'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read # helm pull probe of the just-pushed charts
+    steps:
+      - name: Set up Helm
+        # Pinned to the same version as the sibling release and gate
+        # workflows so the pull probe uses the exact helm they validated
+        # against.
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.18.4
+
+      - name: Log in to GHCR (Helm registry config)
+        # The pull probe authenticates with the ephemeral workflow token
+        # (stdin, never on argv) so it also works while the GHCR package
+        # is still private (first release, before visibility is set).
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$REGISTRY_TOKEN" | helm registry login ghcr.io --username "$REGISTRY_USER" --password-stdin
+
+      - name: Wait for both OCI charts at the tag version
+        # Bounded poll: 30 attempts x 20s per chart, then fail closed — a
+        # red gate means the release-chart run for this tag has not
+        # published (or failed), and the classic index must never get
+        # ahead of the OCI registry.
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#chart-v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '${GITHUB_REF_NAME}' is not chart-vX.Y.Z (GA SemVer); refusing to publish"
+            exit 1
+          fi
+          for chart in velkir-crds velkir; do
+            pulled=""
+            for attempt in $(seq 1 30); do
+              if helm pull "oci://ghcr.io/ioxie/velkir/charts/${chart}" --version "${version}" --destination "$(mktemp -d)"; then
+                pulled=1
+                break
+              fi
+              echo "attempt ${attempt}/30: ${chart} ${version} not pullable yet; retrying in 20s"
+              sleep 20
+            done
+            if [ -z "${pulled}" ]; then
+              echo "::error::${chart} ${version} never became pullable from GHCR; check the release-chart run for this tag"
+              exit 1
+            fi
+          done
+
+  helm-repo-publish:
+    needs: oci-published
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh-pages index push + chart release upload
+    steps:
+      - name: Check out repository
+        # chart-releaser needs the full history and the gh-pages branch
+        # to rebuild the repo index — no shallow clone here.
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        # chart-releaser commits the regenerated index.yaml to gh-pages;
+        # attribute those commits to the actor that pushed the tag.
+        run: |
+          set -euo pipefail
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+
+      - name: Package and publish charts to gh-pages
+        if: github.repository == 'ioxie/velkir'
+        # Packages every chart under charts/, uploads each as a GitHub
+        # release asset, and regenerates index.yaml on gh-pages. The
+        # ephemeral workflow token is enough (contents: write above) — no
+        # PAT. skip_existing keeps re-runs idempotent; chart releases
+        # never claim the repo-wide "latest" marker (that belongs to the
+        # operator's v* releases).
+        uses: helm/chart-releaser-action@cae68fefc6b5f367a0275617c9f83181ba54714f # v1.7.0
+        with:
+          charts_dir: charts
+          skip_existing: true
+          mark_as_latest: false
+        env:
+          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}

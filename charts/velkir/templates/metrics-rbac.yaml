@@ -1,0 +1,89 @@
+{{/*
+Self-contained RBAC + token for the operator's secure metrics endpoint.
+The operator runs controller-runtime's secure metrics server with
+`filters.WithAuthenticationAndAuthorization` (cmd/main.go): every
+/metrics request is TokenReview-validated (authentication) and then
+SubjectAccessReview-checked against the /metrics non-resource URL
+(authorization).
+
+The secure :8443 endpoint is exposed on every install — the `-metrics`
+Service and the manager's metrics server both render unconditionally —
+so the server-side authentication half must always be present:
+
+  - ClusterRoleBinding to the built-in `system:auth-delegator`
+    ClusterRole subjects the operator's own ServiceAccount, granting it
+    permission to call TokenReview / SubjectAccessReview against the
+    apiserver so it can VALIDATE the bearer token an authenticated
+    scraper presents. Without this binding the SA cannot create
+    tokenreviews, so the authn filter fails closed and every scrape
+    returns `500 Internal Server Error: Authentication failed` before
+    authorization is even considered. It therefore renders
+    unconditionally, decoupled from the ServiceMonitor — same
+    server-side pattern as kube-rbac-proxy and the kubebuilder scaffold.
+
+The scraper-side resources below only matter when the chart's own
+ServiceMonitor scrapes using the operator SA token, so they stay gated
+on metrics.serviceMonitor.enabled:
+
+  - ClusterRole granting GET on the /metrics non-resource URL, plus a
+    ClusterRoleBinding subjecting the operator SA to it (the
+    authorization half — lets the operator SA's token read /metrics).
+  - Secret of type kubernetes.io/service-account-token annotated to the
+    operator SA; kube-controller-manager fills in `data.token` with a
+    long-lived JWT the ServiceMonitor presents via bearerTokenSecret.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "velkir.fullname" . }}-auth-delegator
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "velkir.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.metrics.serviceMonitor.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "velkir.fullname" . }}-metrics-reader
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "velkir.fullname" . }}-metrics-reader
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "velkir.fullname" . }}-metrics-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "velkir.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "velkir.fullname" . }}-metrics-token
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+  annotations:
+    # kubernetes.io/service-account.name is the canonical mechanism for
+    # a long-lived SA token Secret. kube-controller-manager populates
+    # data.token (and data.ca.crt) once the referenced SA exists.
+    kubernetes.io/service-account.name: {{ include "velkir.serviceAccountName" . }}
+type: kubernetes.io/service-account-token
+{{- end }}

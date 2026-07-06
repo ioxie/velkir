@@ -1,0 +1,600 @@
+# promtool test rules — verifies alert expressions parse and fire on
+# the expected synthetic input series. Not exhaustive: each alert group
+# gets at least one representative test that pins the firing condition,
+# so a future expression change that breaks evaluation surfaces here.
+#
+# Run via `make promtool-test`.
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ---- valkey-data-plane ----
+  - name: ValkeyReplicationBroken fires when master_link_up drops to 0
+    interval: 30s
+    input_series:
+      - series: 'redis_master_link_up{valkey_role="replica", namespace="prod", pod="valkey-1"}'
+        values: '0x10'  # 0 for 10 samples (5min at 30s interval)
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ValkeyReplicationBroken
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyReplicationBroken
+              severity: critical
+              valkey_role: replica
+              namespace: prod
+              pod: valkey-1
+
+  # A deleted pod's final link-down scrapes must NOT page: the series
+  # goes stale after ~1m (pod torn down mid-termination-grace) and the
+  # [1m] staleness cap drops it out of the expr before the 3m
+  # for-duration elapses. This is the inter-run bleed-over that fired a
+  # critical alert during a clean redeploy.
+  - name: ValkeyReplicationBroken stays quiet on a dead series tail
+    interval: 30s
+    input_series:
+      - series: 'redis_master_link_up{valkey_role="replica", namespace="prod", pod="old-valkey-1"}'
+        values: '0 0 0 _x14'  # 3 link-down scrapes, then the pod is gone
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ValkeyReplicationBroken
+        exp_alerts: []
+
+  - name: ValkeyHighMemory fires when used/max > 80% for 10m
+    interval: 30s
+    input_series:
+      - series: 'redis_used_memory_bytes{namespace="prod", pod="valkey-0"}'
+        values: '900000000x30'  # 900MB sustained for 30 samples (15min)
+      - series: 'redis_memory_max_bytes{namespace="prod", pod="valkey-0"}'
+        values: '1000000000x30'  # 1GB max
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: ValkeyHighMemory
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyHighMemory
+              severity: warning
+              namespace: prod
+              pod: valkey-0
+
+  # ---- valkey-sentinel-plane ----
+  - name: ValkeySentinelTiltMode fires after 60s of tilt
+    interval: 30s
+    input_series:
+      - series: 'redis_sentinel_tilt{namespace="prod", pod="sentinel-0"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ValkeySentinelTiltMode
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeySentinelTiltMode
+              severity: critical
+              namespace: prod
+              pod: sentinel-0
+
+  # ---- velkir ----
+  - name: ValkeyCertExpiringSoon fires when expiry < 14d
+    interval: 1m
+    input_series:
+      # 7 days in seconds = 604800 (well under the 14d=1209600 threshold)
+      - series: 'valkey_cert_expiry_seconds{kind="leaf", job="velkir-metrics"}'
+        values: '604800x80'
+    alert_rule_test:
+      - eval_time: 1h5m
+        alertname: ValkeyCertExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyCertExpiringSoon
+              severity: warning
+              kind: leaf
+              job: velkir-metrics
+
+  - name: ValkeyOperatorReconcileErrors fires on sustained error rate
+    interval: 30s
+    input_series:
+      # Feeds the operator-emitted valkey_reconciliations_failed_total
+      # counter (#213 wired the emit; #108 re-aligned the alert here).
+      # Counter increments by 6 every 30s → 0.2 errors/sec sustained.
+      # The rule's rate() needs ~10m of data before the rate is
+      # well-defined (window starts containing two real samples), so
+      # the condition `rate > 0.1` first crosses true around t≈10.5m.
+      # The rule's `for: 10m` then needs another 10m of true before
+      # the alert fires → first fire at t≈20.5m. Eval at 22m gives a
+      # 1.5m safety margin; the input series runs to t=25m so the
+      # rate window remains stable across the eval point.
+      - series: 'valkey_reconciliations_failed_total{kind="Valkey", namespace="prod", name="cache", reason="ReconcileError", job="velkir-metrics"}'
+        values: '0+6x50'
+    alert_rule_test:
+      - eval_time: 22m
+        alertname: ValkeyOperatorReconcileErrors
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyOperatorReconcileErrors
+              severity: warning
+
+  - name: ValkeyPhaseDegraded fires when Degraded condition holds True for 5m
+    interval: 30s
+    input_series:
+      - series: 'valkey_resource_state{condition_type="Degraded", status="True", namespace="prod", name="cache"}'
+        values: '1x14'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ValkeyPhaseDegraded
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyPhaseDegraded
+              severity: warning
+              condition_type: Degraded
+              status: "True"
+              namespace: prod
+              name: cache
+
+  - name: ValkeyReplicaDown fires when join evaluates to 0 (NotReady operator-owned pod)
+    interval: 30s
+    input_series:
+      # Pod is NotReady (kube_pod_status_ready=0) AND carries the
+      # operator-managed labels (matching the kube_pod_labels join key).
+      - series: 'kube_pod_status_ready{condition="true", namespace="prod", pod="valkey-0"}'
+        values: '0x12'
+      - series: 'kube_pod_labels{namespace="prod", pod="valkey-0", label_app_kubernetes_io_managed_by="velkir", label_velkir_ioxie_dev_component="valkey", valkey_instance="cache"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ValkeyReplicaDown
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyReplicaDown
+              severity: warning
+              namespace: prod
+              pod: valkey-0
+              condition: "true"
+              valkey_instance: cache
+
+  - name: ValkeyQuorumLost fires when n=3 sentinels and only 1 reports master OK
+    interval: 30s
+    input_series:
+      # 3 sentinels exist (tilt presence), only 1 reports master_status==1.
+      # Threshold (n+1)/2 = (3+1)/2 = 2. 1 < 2 ⇒ fires.
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-0"}'
+        values: '1x12'
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-1"}'
+        values: '0x12'
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-2"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-0"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-1"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-2"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ValkeyQuorumLost
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyQuorumLost
+              severity: critical
+              valkey_instance: cache
+              namespace: prod
+
+  - name: ValkeyQuorumLost does NOT fire at n=3 majority boundary (2 of 3 OK)
+    # Regression guard for the (n+1)/2 fix. Under the legacy n/2+1 expression
+    # this case alerted at threshold 2.5 (false positive); under (n+1)/2 = 2
+    # the comparison is 2 < 2 = false, no alert.
+    interval: 30s
+    input_series:
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-0"}'
+        values: '1x12'
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-1"}'
+        values: '1x12'
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-2"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-0"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-1"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-2"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ValkeyQuorumLost
+        exp_alerts: []
+
+  - name: ValkeyQuorumLost does NOT fire at n=5 majority boundary (3 of 5 OK)
+    # Same boundary regression at the n=5 quorum size. Threshold (5+1)/2 = 3;
+    # 3 < 3 = false, no alert. Legacy n/2+1 = 3.5 would have alerted.
+    interval: 30s
+    input_series:
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-0"}'
+        values: '1x12'
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-1"}'
+        values: '1x12'
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-2"}'
+        values: '1x12'
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-3"}'
+        values: '0x12'
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-4"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-0"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-1"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-2"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-3"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-4"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ValkeyQuorumLost
+        exp_alerts: []
+
+  - name: ValkeyQuorumLost fires at n=5 with 2 of 5 OK
+    # 2 < (5+1)/2 = 3 ⇒ fires. Confirms the rule still alerts when quorum is
+    # genuinely lost at the larger sentinel count.
+    interval: 30s
+    input_series:
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-0"}'
+        values: '1x12'
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-1"}'
+        values: '1x12'
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-2"}'
+        values: '0x12'
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-3"}'
+        values: '0x12'
+      - series: 'redis_sentinel_master_status{namespace="prod", valkey_instance="cache", pod="sentinel-4"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-0"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-1"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-2"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-3"}'
+        values: '0x12'
+      - series: 'redis_sentinel_tilt{namespace="prod", valkey_instance="cache", pod="sentinel-4"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ValkeyQuorumLost
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyQuorumLost
+              severity: critical
+              valkey_instance: cache
+              namespace: prod
+
+  - name: ValkeyOperatorReconcileLongDuration fires when p99 reconcile > 30s
+    interval: 1m
+    input_series:
+      # controller-runtime built-in reconcile-time histogram (per-controller,
+      # carries the `controller` label). All observations in the highest
+      # finite bucket (60s), ensuring p99 lands at 60s — above the 30s threshold.
+      #
+      # The rule's rate() window is 10m; condition first becomes well-
+      # defined around t=10m and fires after another 10m of `for:`,
+      # so first alert at t≈20m. Eval at 22m with input running to
+      # t=25m gives a stable rate window across the eval point.
+      - series: 'controller_runtime_reconcile_time_seconds_bucket{controller="valkey", le="0.5", job="velkir-metrics"}'
+        values: '0x25'
+      - series: 'controller_runtime_reconcile_time_seconds_bucket{controller="valkey", le="5", job="velkir-metrics"}'
+        values: '0x25'
+      - series: 'controller_runtime_reconcile_time_seconds_bucket{controller="valkey", le="30", job="velkir-metrics"}'
+        values: '0x25'
+      - series: 'controller_runtime_reconcile_time_seconds_bucket{controller="valkey", le="60", job="velkir-metrics"}'
+        values: '0+10x25'
+      - series: 'controller_runtime_reconcile_time_seconds_bucket{controller="valkey", le="+Inf", job="velkir-metrics"}'
+        values: '0+10x25'
+    alert_rule_test:
+      - eval_time: 22m
+        alertname: ValkeyOperatorReconcileLongDuration
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyOperatorReconcileLongDuration
+              severity: warning
+              controller: valkey
+
+  - name: ValkeyWebhookLatencyHigh fires when operator-side p99 > 0.1s
+    interval: 1m
+    input_series:
+      # Operator-emitted valkey_webhook_request_duration_seconds_bucket
+      # (#213 wired the observe; #108 re-aligned the alert + tightened
+      # the threshold from 5s apiserver-side → 0.1s operator-side, since
+      # the operator measurement excludes apiserver→webhook network).
+      # Observations land entirely in the > 0.1s buckets so p99 > 0.1s.
+      - series: 'valkey_webhook_request_duration_seconds_bucket{webhook="valkey-validator", operation="CREATE", code="200", job="velkir-metrics", le="0.1"}'
+        values: '0x10'
+      - series: 'valkey_webhook_request_duration_seconds_bucket{webhook="valkey-validator", operation="CREATE", code="200", job="velkir-metrics", le="0.5"}'
+        values: '0+5x10'
+      - series: 'valkey_webhook_request_duration_seconds_bucket{webhook="valkey-validator", operation="CREATE", code="200", job="velkir-metrics", le="1"}'
+        values: '0+5x10'
+      - series: 'valkey_webhook_request_duration_seconds_bucket{webhook="valkey-validator", operation="CREATE", code="200", job="velkir-metrics", le="+Inf"}'
+        values: '0+5x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ValkeyWebhookLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyWebhookLatencyHigh
+              severity: warning
+              webhook: valkey-validator
+
+  # ---- valkey-data-plane (extended coverage) ----
+
+  - name: ValkeyReplicationLagHigh fires when replica trails master by > 100MB
+    interval: 30s
+    input_series:
+      # Master at offset 1e9 bytes, replica trails by 1.5e8 (> 1e8 threshold).
+      # The rule's `on(valkey_instance, namespace) group_right` matches the
+      # master and replica series on (valkey_instance, namespace) and yields
+      # the right-hand (replica-side) labelset on the result, so exp_labels
+      # below carry valkey_role=replica + the replica's pod label.
+      - series: 'redis_master_repl_offset{valkey_role="primary", valkey_instance="cache", namespace="prod", pod="valkey-0"}'
+        values: '1000000000x14'
+      - series: 'redis_slave_repl_offset{valkey_role="replica", valkey_instance="cache", namespace="prod", pod="valkey-1"}'
+        values: '850000000x14'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ValkeyReplicationLagHigh
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyReplicationLagHigh
+              severity: warning
+              valkey_role: replica
+              valkey_instance: cache
+              namespace: prod
+              pod: valkey-1
+
+  - name: ValkeyEvictionsOccurring fires when evictions sustain > 1/sec for 10m
+    interval: 30s
+    input_series:
+      # Counter increments by 45 every 30s → 1.5 evictions/sec sustained.
+      # rate(...[5m]) is well-defined from t≈5m onward; rule's `for: 10m`
+      # delays first fire to t≈15m. Eval at 16m gives a 1m safety margin;
+      # the input runs to t=15m (30 samples × 30s).
+      - series: 'redis_evicted_keys_total{namespace="prod", valkey_instance="cache", pod="valkey-0"}'
+        values: '0+45x30'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: ValkeyEvictionsOccurring
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyEvictionsOccurring
+              severity: info
+              namespace: prod
+              valkey_instance: cache
+              pod: valkey-0
+
+  - name: ValkeyRejectedConnections fires on any sustained reject rate
+    interval: 30s
+    input_series:
+      # Counter increments by 1 every 30s → ~0.033 rejects/sec; rate > 0.
+      # rate(...[5m]) well-defined from t≈5m; for: 5m delays first fire to
+      # t≈10m. Eval at 11m with input running to t=12m (24 samples × 30s).
+      - series: 'redis_rejected_connections_total{namespace="prod", valkey_instance="cache", pod="valkey-0"}'
+        values: '0+1x24'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: ValkeyRejectedConnections
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyRejectedConnections
+              severity: warning
+              namespace: prod
+              valkey_instance: cache
+              pod: valkey-0
+
+  # ---- valkey-sentinel-plane (extended coverage) ----
+
+  - name: ValkeySentinelScriptsRunning fires when running_scripts > 0 for 5m
+    interval: 30s
+    input_series:
+      - series: 'redis_sentinel_running_scripts{namespace="prod", valkey_instance="cache", pod="sentinel-0"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ValkeySentinelScriptsRunning
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeySentinelScriptsRunning
+              severity: warning
+              namespace: prod
+              valkey_instance: cache
+              pod: sentinel-0
+
+  # ---- velkir (extended coverage) ----
+
+  - name: ValkeyOperatorWorkqueueBacklog fires when avg depth > 50 sustained
+    interval: 30s
+    input_series:
+      # Workqueue depth pinned at 100 → avg_over_time(...[10m]) = 100 > 50
+      # once the 10m averaging window is filled. for: 10m then waits another
+      # 10m → first fire at t≈20m. Eval at 21m with input running to 22.5m
+      # (45 samples × 30s).
+      - series: 'workqueue_depth{job="velkir-metrics", name="valkey", controller="valkey"}'
+        values: '100x45'
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: ValkeyOperatorWorkqueueBacklog
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyOperatorWorkqueueBacklog
+              severity: warning
+              job: velkir-metrics
+              name: valkey
+              controller: valkey
+
+  - name: ValkeyMasterAwareRolloutStuck fires when rollout condition holds True for 10m
+    interval: 30s
+    input_series:
+      - series: 'valkey_resource_state{condition_type="MasterAwareRolloutInProgress", status="True", namespace="prod", name="cache"}'
+        values: '1x24'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: ValkeyMasterAwareRolloutStuck
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyMasterAwareRolloutStuck
+              severity: warning
+              condition_type: MasterAwareRolloutInProgress
+              status: "True"
+              namespace: prod
+              name: cache
+
+  - name: ValkeySplitBrainDetected fires only on sustained disagreement past bootstrap-grace window
+    interval: 30s
+    input_series:
+      # Gauge climbs by 60 each 30s (operator stamps elapsed seconds
+      # of contiguous QuorumOK=false). Crosses 60s threshold at t=1m
+      # (sample value 120), then 'for: 30s' delays first fire to
+      # t≈1m30s. Eval at 2m gives a 30s margin past the fire edge.
+      - series: 'valkey_split_brain_sustained_seconds{namespace="prod", name="cache"}'
+        values: '0+60x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ValkeySplitBrainDetected
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeySplitBrainDetected
+              severity: critical
+              namespace: prod
+              name: cache
+
+  - name: ValkeySplitBrainDetected does NOT fire on transient bootstrap-race blip
+    interval: 30s
+    input_series:
+      # Disagreement appears at t=0, resolves by t=1m (gauge returns
+      # to 0). Mirrors the rc.11 bootstrap-race false positive #459
+      # reported. Should NOT page.
+      - series: 'valkey_split_brain_sustained_seconds{namespace="prod", name="cache"}'
+        values: '0 30 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ValkeySplitBrainDetected
+        exp_alerts: []
+
+  - name: ValkeyMasterInfoTimeout fires on sustained INFO-replication probe failure past liveness-restart window
+    interval: 30s
+    input_series:
+      # Gauge climbs to 60 by t=30s (well past the 30s threshold);
+      # `for: 60s` delays first fire to t=1m30s. Eval at 2m gives a
+      # 30s margin past the fire edge.
+      - series: 'valkey_master_info_replication_timeout_seconds{namespace="prod", name="cache"}'
+        values: '0+60x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ValkeyMasterInfoTimeout
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyMasterInfoTimeout
+              severity: critical
+              namespace: prod
+              name: cache
+
+  - name: ValkeyMasterInfoTimeout does NOT fire on brief INFO probe blip (kubelet restarted container)
+    interval: 30s
+    input_series:
+      # Probe times out briefly, then kubelet's exec liveness probe
+      # kicks in and restarts the container; subsequent probes
+      # succeed and the gauge resets to 0 before the 30s threshold
+      # was sustained for the 60s `for:` window.
+      - series: 'valkey_master_info_replication_timeout_seconds{namespace="prod", name="cache"}'
+        values: '0 60 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ValkeyMasterInfoTimeout
+        exp_alerts: []
+
+  - name: ValkeyDualMasterObserved fires on a sustained dual-master split
+    interval: 30s
+    input_series:
+      # The operator's dual-master scan stamps the gauge to 1 and no
+      # subsequent scan clears it (the split persists outside a
+      # failover section). `for: 1m` delays first fire to t=1m past
+      # the first 1-sample; eval at 2m gives a full minute of margin.
+      - series: 'valkey_dual_master_observed{namespace="prod", name="cache"}'
+        values: '0 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m30s
+        alertname: ValkeyDualMasterObserved
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyDualMasterObserved
+              severity: critical
+              namespace: prod
+              name: cache
+
+  - name: ValkeyDualMasterObserved does NOT fire on a sub-for-window blip (pins the for:1m clause)
+    interval: 30s
+    input_series:
+      # A transient split: the gauge is 1 for a single 30s sample
+      # (scan-race window / self-heal resolves it), back to 0 after.
+      # Evaluated at 45s — the gauge went 1 at t=30s, so a for-LESS
+      # rule would already be firing here; the real `for: 1m` rule is
+      # still only pending. Deleting the `for:` clause fails this test.
+      - series: 'valkey_dual_master_observed{namespace="prod", name="cache"}'
+        values: '0 1 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 45s
+        alertname: ValkeyDualMasterObserved
+        exp_alerts: []
+
+  - name: ValkeySentinelTopologyMismatch fires on a sustained per-dimension deficit
+    interval: 30s
+    input_series:
+      # The operator stamps the per-dimension deficit gauge only after
+      # its own 60s sustained-mismatch debounce, so a series arriving at
+      # 1 is already a debounced fact; the rule's `for: 15m` then
+      # requires the deficit to persist. The replicas dimension sits at
+      # 0 the whole time (the operator writes 0 while in spec, it does
+      # not delete the series) and must not alert — pins the `> 0`
+      # threshold against the zero-valued sibling series.
+      - series: 'valkey_sentinel_topology_mismatch{namespace="prod", name="cache", dimension="sentinels"}'
+        values: '1x40'
+      - series: 'valkey_sentinel_topology_mismatch{namespace="prod", name="cache", dimension="replicas"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: ValkeySentinelTopologyMismatch
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeySentinelTopologyMismatch
+              severity: warning
+              namespace: prod
+              name: cache
+              dimension: sentinels
+
+  - name: ValkeySentinelTopologyMismatch does NOT fire on a self-healing deficit (pins the for:15m clause)
+    interval: 30s
+    input_series:
+      # A deficit that pod replacement resolves after ~12.5m: evaluated
+      # at 12m the gauge is still 1, so a for-less rule would already be
+      # firing; the real `for: 15m` rule is still only pending. Deleting
+      # the `for:` clause fails this test.
+      - series: 'valkey_sentinel_topology_mismatch{namespace="prod", name="cache", dimension="sentinels"}'
+        values: '1x25 0x10'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ValkeySentinelTopologyMismatch
+        exp_alerts: []
+
+  - name: ValkeyMissingFromCluster fires when Available condition holds False for 5m
+    interval: 30s
+    input_series:
+      - series: 'valkey_resource_state{condition_type="Available", status="False", namespace="prod", name="cache"}'
+        values: '1x14'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ValkeyMissingFromCluster
+        exp_alerts:
+          - exp_labels:
+              alertname: ValkeyMissingFromCluster
+              severity: critical
+              condition_type: Available
+              status: "False"
+              namespace: prod
+              name: cache

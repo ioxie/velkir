@@ -1,0 +1,55 @@
+# Velkir public-disclosure secret-scan ruleset.
+#
+# GENERATED from tools/publish/scrub_patterns.yaml by
+# tools/publish/gen_gitleaks_toml.py -- do not hand-edit. Regenerate with
+#   python3 tools/publish/gen_gitleaks_toml.py > .gitleaks.toml
+# The pr-gate.yml gitleaks job re-runs the generator in --check mode (advisory)
+# so this file cannot silently drift from the shared block_classes.
+#
+# Each [[rules]] mirrors one block_class so the gate, the cutter's scrub, and the
+# standalone leak_gate detect the same tokens. No [extend] block is present, so
+# ONLY these rules apply -- the built-in gitleaks default ruleset is not loaded;
+# this gate targets private-disclosure tokens, not generic credential shapes.
+title = "velkir-public-disclosure-scan"
+
+[[rules]]
+id = 'private_fqdn'
+description = 'Private *.xies.io domain (k8s hostnames + old API group)'
+regex = '''(?:[a-z0-9-]+\.)+xies\.io'''
+
+[[rules]]
+id = 'robot_account'
+description = 'Private registry robot account token'
+regex = '''robot\$[\w-]+'''
+
+[[rules]]
+id = 'mkc_runner'
+description = 'Private self-hosted runner reference'
+regex = '''(?i)(?:self-hosted runner|\[mkc\]|\bmkc\b|mkc-runner)'''
+
+[[rules]]
+id = 'mr_url'
+description = 'GitLab merge-request URL (process disclosure)'
+regex = '''See merge request \S+![0-9]+'''
+
+[[rules]]
+id = 'branch_subject'
+description = 'Private merge-branch subject line'
+regex = '''Merge branch '[^']+/'''
+
+[[rules]]
+id = 'milestone_id'
+description = 'Internal milestone identifier'
+regex = '''\bM[0-9]+\.[0-9]+\b'''
+
+[[rules]]
+id = 'ai_attribution'
+description = 'AI co-authorship / generation attribution'
+regex = '''(?i)(?:co-authored-by:[^\n]*(?:claude|anthropic|copilot|chatgpt|cursor|\[bot\])|generated (?:with|by) (?:claude|copilot|chatgpt|cursor)|\banthropic\b|\bclaude\b)'''
+
+[[allowlists]]
+description = "repo-own ruleset-bearing files carry the private tokens as data"
+paths = [
+  '''^\.gitleaks\.toml$''',
+  '''^tools/publish/''',
+]

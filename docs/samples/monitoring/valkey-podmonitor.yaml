@@ -1,0 +1,38 @@
+# Data-plane PodMonitor — scrapes the redis_exporter sidecar on every
+# managed Valkey pod. The sidecar serves plain HTTP /metrics on the
+# container port named "metrics" (:9121); enable it per-CR with
+# spec.metrics.enabled=true.
+#
+# This selects Valkey pods across all namespaces. If you prefer per-CR
+# scrape config instead, the operator can render a PodMonitor for each
+# CR directly — set spec.metrics.podMonitor.enabled=true on the Valkey
+# resource and skip this sample (don't apply both, or you double-scrape).
+#
+# The relabelings lift the operator-stamped pod labels onto each redis_*
+# series so the alerts in prometheusrule.yaml — which group by
+# valkey_instance / namespace and split lag direction by valkey_role —
+# resolve.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: valkey-data
+  labels:
+    release: prometheus   # set to your Prometheus's monitor-discovery label
+spec:
+  namespaceSelector:
+    any: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/managed-by: velkir
+      velkir.ioxie.dev/component: valkey
+  podMetricsEndpoints:
+    - port: metrics         # exporter container exposes :9121 as port name "metrics"
+      interval: 30s
+      path: /metrics
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_velkir_ioxie_dev_role]
+          targetLabel: valkey_role
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+          targetLabel: valkey_instance
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace

@@ -1,0 +1,141 @@
+# Rule file consumed by `promtool test rules` — same alert content as
+# the chart-rendered PrometheusRule, with the helm template references
+# resolved to a fixed shape that promtool can parse. The chart template
+# itself can't be consumed directly (it has helm `{{ }}` substitutions
+# alongside escaped Prometheus `{{ }}` references) so this file is the
+# evaluable form that test fixtures reference. Keep this file in sync
+# with `charts/velkir/templates/prometheusrule.yaml` whenever
+# the alert expressions change — `make promtool-test` is the gate.
+groups:
+  - name: valkey-data-plane
+    interval: 30s
+    rules:
+      - alert: ValkeyReplicaDown
+        expr: |
+          kube_pod_status_ready{condition="true"}
+            * on(pod) group_left(valkey_instance)
+              kube_pod_labels{label_app_kubernetes_io_managed_by="velkir",
+                              label_velkir_ioxie_dev_component="valkey"}
+          == 0
+        for: 5m
+        labels: { severity: warning }
+      - alert: ValkeyReplicationBroken
+        expr: last_over_time(redis_master_link_up{valkey_role="replica"}[1m]) == 0
+        for: 3m
+        labels: { severity: critical }
+      - alert: ValkeyReplicationLagHigh
+        expr: |
+          (redis_master_repl_offset{valkey_role="primary"} -
+            on(valkey_instance, namespace) group_right
+           redis_slave_repl_offset{valkey_role="replica"}) > 1e8
+        for: 5m
+        labels: { severity: warning }
+      - alert: ValkeyHighMemory
+        expr: |
+          (redis_used_memory_bytes
+            / ignoring(valkey_role)
+              (redis_memory_max_bytes > 0)
+          ) > 0.8
+        for: 10m
+        labels: { severity: warning }
+      - alert: ValkeyEvictionsOccurring
+        expr: rate(redis_evicted_keys_total[5m]) > 1
+        for: 10m
+        labels: { severity: info }
+      - alert: ValkeyRejectedConnections
+        expr: rate(redis_rejected_connections_total[5m]) > 0
+        for: 5m
+        labels: { severity: warning }
+  - name: valkey-sentinel-plane
+    interval: 30s
+    rules:
+      - alert: ValkeySentinelTiltMode
+        expr: redis_sentinel_tilt == 1
+        for: 60s
+        labels: { severity: critical }
+      - alert: ValkeyQuorumLost
+        # Strict-majority threshold: alert when count_OK < (n+1)/2, where n
+        # is the total sentinel count for the cluster. +1 inside the division
+        # gives integer thresholds for odd n (n=3 → 2, n=5 → 3); the legacy
+        # `n/2 + 1` shape produced 2.5 / 3.5 and false-positived at the
+        # majority boundary.
+        expr: |
+          sum by (valkey_instance, namespace) (redis_sentinel_master_status == 1)
+            <
+          on(valkey_instance, namespace) (
+            (sum by (valkey_instance, namespace) (redis_sentinel_tilt * 0 + 1) + 1)
+              / 2
+          )
+        for: 60s
+        labels: { severity: critical }
+      - alert: ValkeySentinelScriptsRunning
+        expr: redis_sentinel_running_scripts > 0
+        for: 5m
+        labels: { severity: warning }
+  - name: velkir
+    interval: 30s
+    rules:
+      - alert: ValkeyOperatorReconcileErrors
+        expr: |
+          sum (
+            rate(valkey_reconciliations_failed_total{job="velkir-metrics"}[10m])
+          ) > 0.1
+        for: 10m
+        labels: { severity: warning }
+      - alert: ValkeyOperatorReconcileLongDuration
+        expr: |
+          histogram_quantile(0.99,
+            sum by (controller, le) (
+              rate(controller_runtime_reconcile_time_seconds_bucket{job="velkir-metrics"}[10m])
+            )
+          ) > 30
+        for: 10m
+        labels: { severity: warning }
+      - alert: ValkeyOperatorWorkqueueBacklog
+        expr: |
+          avg_over_time(workqueue_depth{job="velkir-metrics", name=~"valkey.*"}[10m]) > 50
+        for: 10m
+        labels: { severity: warning }
+      - alert: ValkeyMasterAwareRolloutStuck
+        expr: |
+          valkey_resource_state{condition_type="MasterAwareRolloutInProgress", status="True"} == 1
+        for: 10m
+        labels: { severity: warning }
+      - alert: ValkeyPhaseDegraded
+        expr: valkey_resource_state{condition_type="Degraded", status="True"} == 1
+        for: 5m
+        labels: { severity: warning }
+      - alert: ValkeySplitBrainDetected
+        expr: valkey_split_brain_sustained_seconds > 60
+        for: 30s
+        labels: { severity: critical }
+      - alert: ValkeyDualMasterObserved
+        expr: valkey_dual_master_observed > 0
+        for: 1m
+        labels: { severity: critical }
+      - alert: ValkeySentinelTopologyMismatch
+        expr: valkey_sentinel_topology_mismatch > 0
+        for: 15m
+        labels: { severity: warning }
+      - alert: ValkeyMasterInfoTimeout
+        expr: valkey_master_info_replication_timeout_seconds > 30
+        for: 60s
+        labels: { severity: critical }
+      - alert: ValkeyMissingFromCluster
+        expr: |
+          valkey_resource_state{condition_type="Available", status="False"} == 1
+        for: 5m
+        labels: { severity: critical }
+      - alert: ValkeyWebhookLatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, webhook) (
+              rate(valkey_webhook_request_duration_seconds_bucket{job="velkir-metrics"}[5m])
+            )
+          ) > 0.1
+        for: 5m
+        labels: { severity: warning }
+      - alert: ValkeyCertExpiringSoon
+        expr: valkey_cert_expiry_seconds < 1209600
+        for: 1h
+        labels: { severity: warning }

@@ -1,0 +1,51 @@
+{{/*
+ValidatingWebhookConfiguration — the validating webhook.
+failurePolicy=Fail because validation enforces invariants the cluster
+cannot recover from if bypassed (operator-owned config directives,
+bitnami images, reserved label collisions).
+*/}}
+{{- if .Values.webhook.enabled -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "velkir.fullname" . }}-validator
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+    velkir.ioxie.dev/inject-ca: "true"
+  {{- if .Values.webhook.certManager.enabled }}
+  annotations:
+    # cert-manager's cainjector watches this annotation and patches the
+    # webhook's clientConfig.caBundle with the CA from the named
+    # Certificate's spec.secretName Secret. The dynauth injector path is
+    # skipped at operator boot when webhook.certManager.enabled=true, so
+    # this annotation is the only CA-bundle wiring in cert-manager mode.
+    cert-manager.io/inject-ca-from: {{ printf "%s/velkir-webhook-cert" .Release.Namespace | quote }}
+  {{- end }}
+webhooks:
+  - name: vvalkey-v1beta1.kb.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    # 5s — same reasoning as the defaulter; validator is a pure Go
+    # transform with no API calls.
+    timeoutSeconds: 5
+    # Failure-policy=Fail without an exclusion would block CRUD on
+    # any Valkey CR in kube-system or the operator's own namespace
+    # during a webhook-down window — this turns "operator restarting"
+    # into "operator can't be restarted because its own CRs are
+    # locked". The shared helper excludes those namespaces by default;
+    # a webhook.namespaceSelector override scopes the rest but always
+    # keeps the kube-system exclusion (see the helper for why).
+    namespaceSelector:
+      {{- include "velkir.webhookNamespaceSelector" . | nindent 6 }}
+    clientConfig:
+      service:
+        name: {{ include "velkir.fullname" . }}-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate-velkir-ioxie-dev-v1beta1-valkey
+    rules:
+      - apiGroups: ["velkir.ioxie.dev"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["valkeys"]
+{{- end }}

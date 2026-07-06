@@ -1,0 +1,500 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "datasource", "uid": "grafana" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Operator-self health: reconcile rate / latency / errors, workqueue depth, webhook latency, cert expiry. Controller-runtime queries are scoped to the operator's own controllers (valkey, ca-bundle-injector) — without that scope, the dashboard pulls every operator in the cluster (Flux, cert-manager, etc.) and the legend drowns the signal.",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "tags": ["valkey", "velkir"],
+  "links": [
+    {
+      "title": "Valkey Fleet Overview",
+      "type": "link",
+      "url": "/d/valkey-fleet-overview",
+      "targetBlank": false,
+      "icon": "dashboard"
+    },
+    {
+      "title": "Valkey Single Deployment",
+      "type": "link",
+      "url": "/d/valkey-single-deployment",
+      "targetBlank": false,
+      "icon": "dashboard"
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "Prometheus", "value": "prometheus" },
+        "hide": 0,
+        "label": "Datasource",
+        "name": "DS_PROMETHEUS",
+        "query": "prometheus",
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": { "selected": true, "text": "valkey|ca-bundle-injector", "value": "valkey|ca-bundle-injector" },
+        "hide": 0,
+        "label": "Operator controllers",
+        "name": "controller",
+        "query": "valkey|ca-bundle-injector",
+        "skipUrlSync": false,
+        "type": "constant"
+      },
+      {
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(valkey_resources_paused, namespace)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".+",
+        "label": "Namespace",
+        "multi": true,
+        "name": "namespace",
+        "options": [],
+        "query": { "query": "label_values(valkey_resources_paused, namespace)", "refId": "namespace" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(valkey_resources_paused{namespace=~\"$namespace\"}, name)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".+",
+        "label": "CR",
+        "multi": true,
+        "name": "valkey",
+        "options": [],
+        "query": { "query": "label_values(valkey_resources_paused{namespace=~\"$namespace\"}, name)", "refId": "valkey" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-3h", "to": "now" },
+  "timezone": "browser",
+  "title": "Valkey Operator",
+  "uid": "velkir",
+  "version": 4,
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Reconcile rate (success vs errors)",
+      "description": "Per-controller reconcile rate from controller-runtime's built-in counters. Scoped to the operator's own controllers via the $controller variable — without that filter the legend pulls every operator in the cluster (Flux, cert-manager, etc.).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (controller) (rate(controller_runtime_reconcile_total{controller=~\"$controller\"}[5m]))",
+          "legendFormat": "{{controller}} total"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total{controller=~\"$controller\"}[5m]))",
+          "legendFormat": "{{controller}} errors"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Reconcile p50/p95/p99 duration",
+      "description": "Controller-runtime's built-in per-controller reconcile latency histogram. p99 brushing the 60s+ band indicates a stuck reconcile path. Scoped to $controller.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket{controller=~\"$controller\"}[5m])))",
+          "legendFormat": "{{controller}} p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket{controller=~\"$controller\"}[5m])))",
+          "legendFormat": "{{controller}} p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket{controller=~\"$controller\"}[5m])))",
+          "legendFormat": "{{controller}} p99"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Workqueue depth",
+      "description": "Per-controller workqueue depth. Sustained non-zero is the canonical 'reconciler can't keep up' signal — investigate the matching p99 duration panel.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (name) (workqueue_depth{name=~\"$controller\"})",
+          "legendFormat": "{{name}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Reconcile panics + timeouts + terminal errors",
+      "description": "Non-zero on any series is a reliability defect. Panics short-circuit reconcile mid-flight; timeouts indicate the per-controller context window expired; terminal errors mean the reconciler returned a non-retriable failure.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (controller) (rate(controller_runtime_reconcile_panics_total{controller=~\"$controller\"}[5m]))",
+          "legendFormat": "{{controller}} panics"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (controller) (rate(controller_runtime_reconcile_timeouts_total{controller=~\"$controller\"}[5m]))",
+          "legendFormat": "{{controller}} timeouts"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (controller) (rate(controller_runtime_reconcile_terminal_errors_total{controller=~\"$controller\"}[5m]))",
+          "legendFormat": "{{controller}} terminal"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.0001 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Webhook admission latency (p50/p95/p99)",
+      "description": "Operator-side webhook latency from valkey_webhook_request_duration_seconds.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (webhook, le) (rate(valkey_webhook_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{webhook}} p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (webhook, le) (rate(valkey_webhook_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{webhook}} p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (webhook, le) (rate(valkey_webhook_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{webhook}} p99"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Webhook request rate by code",
+      "description": "Derived from the histogram's _count time series (the operator does not emit a separate _total). One series per (webhook, code) tuple.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (webhook, code) (rate(valkey_webhook_request_duration_seconds_count[5m]))",
+          "legendFormat": "{{webhook}}/{{code}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Webhook handler panics",
+      "description": "controller_runtime_webhook_panics_total. Non-zero indicates a panic mid-webhook-handler — distinct from the reconcile-panics series above. A panicking webhook handler returns 500 to the apiserver and (depending on failurePolicy) either fails-closed on CR admission or silently bypasses validation. Scope: controller-runtime publishes this metric per `webhook` label, which carries the kubebuilder-derived webhook path (e.g. `vvalkey-v1beta1.kb.io`). Other operators in the cluster use their own paths; the legend separates them per webhook name without an explicit `$controller`-style filter.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (webhook) (rate(controller_runtime_webhook_panics_total[5m]))",
+          "legendFormat": "{{webhook}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.0001 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Webhook cert expiry",
+      "description": "Seconds until each cert kind expires. Below 14d → yellow; below 0 → red. max by (kind) collapses duplicate series from multi-replica operator deployments.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 30, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (kind) (valkey_cert_expiry_seconds)",
+          "legendFormat": "{{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 1209600 },
+              { "color": "green", "value": 2592000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "graphMode": "none",
+        "colorMode": "value",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Redaction registry tokens",
+      "description": "Process-wide count of distinct tokens registered for log scrubbing. Steady-state 1-3 per live CR with auth; sustained >10 hints at a Register-without-Forget leak. max() collapses per-operator-pod duplicates.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 30, "w": 6, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(valkey_redaction_registry_tokens)",
+          "legendFormat": "tokens"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 50 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "PVC resize in progress",
+      "description": "Count of CRs whose PVC-resize sub-state-machine is mid-flight. Steady-state 0; ≤replica-count during planned cluster expansions.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 18, "y": 30, "w": 6, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (namespace, name) (valkey_pvc_resize_in_progress{namespace=~\"$namespace\", name=~\"$valkey\"}))",
+          "legendFormat": "in-progress"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Sentinel observer connected (per CR / per sentinel pod)",
+      "description": "1 = observer goroutine holds an open subscription. 0 = disconnected. max by (...) collapses per-operator-pod duplicates while preserving the per-sentinel-pod axis.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 36, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (namespace, name, sentinel_pod) (valkey_sentinel_observer_connected{namespace=~\"$namespace\", name=~\"$valkey\"})",
+          "legendFormat": "{{namespace}}/{{name}} {{sentinel_pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Sentinel pubsub message rate by event",
+      "description": "Sentinel chatter classified by event type. Spikes in +sdown / +odown / +switch-master indicate an in-flight failover; sustained noise on +tilt indicates clock skew or network instability.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 36, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (event) (rate(valkey_sentinel_pubsub_messages_total{namespace=~\"$namespace\", name=~\"$valkey\"}[5m]))",
+          "legendFormat": "{{event}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Exporter sidecars unreachable",
+      "description": "Count of valkey pods whose exporter sidecar the operator's watcher last observed as unreachable. Filter follows the Namespace/CR template scope. Non-zero indicates a per-pod observability gap (the per-pod dashboard panels will show 'No data' until this clears).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 44, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(max by (namespace, name, pod) (valkey_exporter_sidecar_up{namespace=~\"$namespace\", name=~\"$valkey\"}) == 0)",
+          "legendFormat": "unreachable"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Quorum suppression transitions",
+      "description": "Per-CR rate of transitions through the quorum-suppression state machine. Spikes track operator pause/resume of label writes in response to sentinel disagreement.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 8, "y": 44, "w": 16, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (namespace, name) (rate(valkey_quorum_suppression_transitions_total{namespace=~\"$namespace\", name=~\"$valkey\"}[5m]))",
+          "legendFormat": "{{namespace}}/{{name}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "API server request rate (operator client, by code)",
+      "description": "Operator-side Kubernetes API client call rate from rest_client_requests_total, split by HTTP status code — a rising 4xx/5xx share flags throttling (429) or RBAC/conflict churn. Process-global (the client metric carries only code/method/host, no Namespace/CR scope). controller-runtime's client-go metrics adapter registers only the request counter, so apiserver-call latency percentiles are not exposed; operator-side latency is the Reconcile p50/p95/p99 panel above.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 50, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (code) (rate(rest_client_requests_total[5m]))",
+          "legendFormat": "{{code}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Sentinel pubsub reconnect rate",
+      "description": "Per-CR rate of sentinel observer reconnections (rate(valkey_sentinel_observer_reconnects_total[5m])). Each reconnect is the observer re-establishing a dropped pub/sub subscription; a sustained non-zero rate signals a flapping sentinel connection or pod churn — distinct from the message-rate panel, which counts events on an already-healthy subscription.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 50, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (namespace, name) (rate(valkey_sentinel_observer_reconnects_total{namespace=~\"$namespace\", name=~\"$valkey\"}[5m]))",
+          "legendFormat": "{{namespace}}/{{name}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 17,
+      "type": "stat",
+      "title": "Active sentinel observers (total)",
+      "description": "Operator-wide count of live sentinel observer connections (sum of valkey_sentinel_observer_connected across all CRs and sentinel pods). Complements the per-CR/per-pod breakdown above with a single fleet-health number; 0 while CRs are running means the operator has lost all hybrid push/pull observation.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 58, "w": 6, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(valkey_sentinel_observer_connected)",
+          "legendFormat": "observers"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 } }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Leader election status (1 = holds leadership)",
+      "description": "controller-runtime leader_election_master_status per operator pod — 1 on the replica currently holding the lease, 0 on standbys. With a single replica it sits flat at 1; in HA a step from one pod to another marks a leadership handover (lease expiry or rollout). The per-pod split comes from the scrape target's pod label.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 6, "y": 58, "w": 18, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (pod) (leader_election_master_status)",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1 } }
+    }
+  ]
+}

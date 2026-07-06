@@ -1,0 +1,31 @@
+{{/*
+Operator config file, mounted at /etc/velkir/config.yaml — the
+manager's --config default path. Surfaces the leader-election lease
+timing as chart values so an operator can tune lease tolerance per
+cluster without hand-editing a mounted file.
+
+The loader overlays this onto its built-in defaults and rejects unknown
+keys, so only the keys rendered here override and a typo fails the pod
+fast at startup rather than being silently ignored. `enabled` is left to
+the --leader-elect deployment arg (single source) and is intentionally
+not rendered here.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "velkir.fullname" . }}-config
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- with .Values.watchNamespaces }}
+    watchNamespaces:
+      {{- range . }}
+      - {{ . | quote }}
+      {{- end }}
+    {{- end }}
+    leaderElection:
+      leaseDuration: {{ .Values.leaderElection.leaseDuration | quote }}
+      renewDeadline: {{ .Values.leaderElection.renewDeadline | quote }}
+      retryPeriod: {{ .Values.leaderElection.retryPeriod | quote }}
+      releaseOnCancel: {{ .Values.leaderElection.releaseOnCancel }}

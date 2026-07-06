@@ -1,0 +1,176 @@
+suite: operator prometheusrule
+templates:
+  - prometheusrule.yaml
+tests:
+  - it: renders nothing when metrics.prometheusRule.enabled is false (default)
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders a PrometheusRule when enabled
+    set:
+      metrics.prometheusRule.enabled: true
+    asserts:
+      - isKind:
+          of: PrometheusRule
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-velkir
+      - equal:
+          path: apiVersion
+          value: monitoring.coreos.com/v1
+
+  - it: ships exactly the three documented alert groups
+    set:
+      metrics.prometheusRule.enabled: true
+    asserts:
+      - lengthEqual:
+          path: spec.groups
+          count: 3
+      - equal:
+          path: spec.groups[0].name
+          value: valkey-data-plane
+      - equal:
+          path: spec.groups[1].name
+          value: valkey-sentinel-plane
+      - equal:
+          path: spec.groups[2].name
+          value: velkir
+
+  - it: renders all 21 alerts (6 data-plane + 3 sentinel + 12 operator)
+    set:
+      metrics.prometheusRule.enabled: true
+    asserts:
+      # Per-group counts pinned so a stray added/duplicated alert fails
+      # the test (the per-alert `contains` below only catches drops).
+      - lengthEqual:
+          path: spec.groups[0].rules
+          count: 6
+      - lengthEqual:
+          path: spec.groups[1].rules
+          count: 3
+      - lengthEqual:
+          path: spec.groups[2].rules
+          count: 12
+      # Data-plane (6 alerts)
+      - contains:
+          path: spec.groups[0].rules
+          any: true
+          content:
+            alert: ValkeyReplicaDown
+      - contains:
+          path: spec.groups[0].rules
+          any: true
+          content:
+            alert: ValkeyReplicationBroken
+      - contains:
+          path: spec.groups[0].rules
+          any: true
+          content:
+            alert: ValkeyReplicationLagHigh
+      - contains:
+          path: spec.groups[0].rules
+          any: true
+          content:
+            alert: ValkeyHighMemory
+      - contains:
+          path: spec.groups[0].rules
+          any: true
+          content:
+            alert: ValkeyEvictionsOccurring
+      - contains:
+          path: spec.groups[0].rules
+          any: true
+          content:
+            alert: ValkeyRejectedConnections
+      # Sentinel-plane (3 alerts)
+      - contains:
+          path: spec.groups[1].rules
+          any: true
+          content:
+            alert: ValkeySentinelTiltMode
+      - contains:
+          path: spec.groups[1].rules
+          any: true
+          content:
+            alert: ValkeyQuorumLost
+      - contains:
+          path: spec.groups[1].rules
+          any: true
+          content:
+            alert: ValkeySentinelScriptsRunning
+      # Operator (11 alerts)
+      - contains:
+          path: spec.groups[2].rules
+          any: true
+          content:
+            alert: ValkeyOperatorReconcileErrors
+      - contains:
+          path: spec.groups[2].rules
+          any: true
+          content:
+            alert: ValkeyOperatorReconcileLongDuration
+      - contains:
+          path: spec.groups[2].rules
+          any: true
+          content:
+            alert: ValkeyOperatorWorkqueueBacklog
+      - contains:
+          path: spec.groups[2].rules
+          any: true
+          content:
+            alert: ValkeyMasterAwareRolloutStuck
+      - contains:
+          path: spec.groups[2].rules
+          any: true
+          content:
+            alert: ValkeyPhaseDegraded
+      - contains:
+          path: spec.groups[2].rules
+          any: true
+          content:
+            alert: ValkeySplitBrainDetected
+      - contains:
+          path: spec.groups[2].rules
+          any: true
+          content:
+            alert: ValkeyDualMasterObserved
+      - contains:
+          path: spec.groups[2].rules
+          any: true
+          content:
+            alert: ValkeySentinelTopologyMismatch
+      - contains:
+          path: spec.groups[2].rules
+          any: true
+          content:
+            alert: ValkeyMasterInfoTimeout
+      - contains:
+          path: spec.groups[2].rules
+          any: true
+          content:
+            alert: ValkeyMissingFromCluster
+      - contains:
+          path: spec.groups[2].rules
+          any: true
+          content:
+            alert: ValkeyWebhookLatencyHigh
+      - contains:
+          path: spec.groups[2].rules
+          any: true
+          content:
+            alert: ValkeyCertExpiringSoon
+
+  - it: honours additional labels under metrics.prometheusRule.additionalLabels
+    set:
+      metrics.prometheusRule.enabled: true
+      metrics.prometheusRule.additionalLabels:
+        prometheus: kube-prometheus
+        team: platform
+    asserts:
+      - equal:
+          path: metadata.labels.prometheus
+          value: kube-prometheus
+      - equal:
+          path: metadata.labels.team
+          value: platform

@@ -1,0 +1,313 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "datasource", "uid": "grafana" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Fleet view across every Valkey CR in the cluster. Audience: SRE / platform. redis_* queries filter on the operator-stamped valkey_instance label so unrelated Redis exporters in the cluster (Harbor, OpsTree, etc.) don't pollute the aggregations.",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "tags": ["valkey", "velkir"],
+  "links": [
+    {
+      "title": "Valkey Operator",
+      "type": "link",
+      "url": "/d/velkir",
+      "targetBlank": false,
+      "icon": "dashboard"
+    },
+    {
+      "title": "Valkey Single Deployment",
+      "type": "link",
+      "url": "/d/valkey-single-deployment",
+      "targetBlank": false,
+      "icon": "dashboard"
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "Prometheus", "value": "prometheus" },
+        "hide": 0,
+        "label": "Datasource",
+        "name": "DS_PROMETHEUS",
+        "query": "prometheus",
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "title": "Valkey Fleet Overview",
+  "uid": "valkey-fleet-overview",
+  "version": 3,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Active Valkey CRs",
+      "description": "Count of Valkey CRs the operator currently tracks. max by(...) collapses per-operator-pod-replica duplicates.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(max by (namespace, name) (valkey_resources_paused))",
+          "legendFormat": "CRs"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Paused CRs",
+      "description": "Count of CRs carrying velkir.ioxie.dev/paused=true. Non-zero is operator-by-design; useful for spotting forgotten pauses.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (namespace, name) (valkey_resources_paused))",
+          "legendFormat": "paused"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Split-brain detections (last 1h)",
+      "description": "Number of times the operator observed sentinels disagreeing on master identity across the fleet. Non-zero is an SRE-actionable incident.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(valkey_split_brain_detections_total[1h]))",
+          "legendFormat": "detections"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Replicas with broken master link",
+      "description": "Count of valkey replica pods reporting redis_master_link_up=0. Requires PodMonitor scraping. Alert ValkeyReplicationBroken fires after 2m of broken link.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(redis_master_link_up{valkey_instance!=\"\", valkey_role=\"replica\"} == 0)",
+          "legendFormat": "broken"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Sentinel pubsub event rate by event (fleet)",
+      "description": "+switch-master events approximate the failover rate; +sdown / +odown spikes precede them. Pre-rc.8 the dashboard queried valkey_failovers_total (declared but never emitted); this panel uses what the operator actually publishes.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 6, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (event) (rate(valkey_sentinel_pubsub_messages_total[5m]))",
+          "legendFormat": "{{event}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Total memory used vs maxmemory across fleet (primaries)",
+      "description": "Requires PodMonitor scraping. valkey_instance!=\"\" excludes non-Valkey Redis exporters sharing the cluster Prometheus. The `max` series only renders when at least one primary in the fleet has `spec.valkey.configuration` setting `maxmemory` to a non-zero value — CRs left at Valkey's default (0 = unlimited) contribute 0 to the sum, which the `> 0` post-filter drops to avoid drawing a flat-zero line.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 6, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(redis_memory_used_bytes{valkey_instance!=\"\", valkey_role=\"primary\"})",
+          "legendFormat": "used"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(redis_memory_max_bytes{valkey_instance!=\"\", valkey_role=\"primary\"}) > 0",
+          "legendFormat": "max"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decbytes" } }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Total commands/sec across fleet",
+      "description": "Requires PodMonitor scraping. valkey_instance!=\"\" prevents non-Valkey exporters from leaking into the aggregation.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 14, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(redis_commands_processed_total{valkey_instance!=\"\"}[5m]))",
+          "legendFormat": "ops/s"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Network I/O across fleet",
+      "description": "Total bytes received / sent across all Valkey-operator-managed pods. Requires PodMonitor scraping.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 14, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(redis_net_input_bytes_total{valkey_instance!=\"\"}[5m]))",
+          "legendFormat": "in"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(redis_net_output_bytes_total{valkey_instance!=\"\"}[5m]))",
+          "legendFormat": "out"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" } }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Connected clients across fleet (primaries vs replicas)",
+      "description": "Per-role aggregate of redis_connected_clients. Requires PodMonitor scraping.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 22, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(redis_connected_clients{valkey_instance!=\"\", valkey_role=\"primary\"})",
+          "legendFormat": "primary"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(redis_connected_clients{valkey_instance!=\"\", valkey_role=\"replica\"})",
+          "legendFormat": "replica"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Failover-related sentinel events per CR",
+      "description": "+switch-master and +reset-master signal sentinel-driven failover or orphan-master demotion paths. Per-CR view so spikes correlate to specific deployments.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 22, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (namespace, name) (rate(valkey_sentinel_pubsub_messages_total{event=~\"\\\\+(switch-master|reset-master)\"}[5m]))",
+          "legendFormat": "{{namespace}}/{{name}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 11,
+      "type": "state-timeline",
+      "title": "Valkey CR phase (Ready condition over time)",
+      "description": "Per-CR readiness, one row per CR. Green = the Ready condition is True; red = not Ready (False/Unknown). Sourced from valkey_resource_state (the operator-published condition gauge), not exporter data, so it reflects the operator's view even while a CR's pods are unscrapeable. A state-timeline renders the rows=CR / colour=status intent of a phase view better than a numeric heatmap.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 30, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (name) (valkey_resource_state{kind=\"Valkey\", condition_type=\"Ready\", status=\"True\"})",
+          "legendFormat": "{{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "Not Ready", "color": "red", "index": 0 }, "1": { "text": "Ready", "color": "green", "index": 1 } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      },
+      "options": { "mergeValues": true, "showValue": "auto", "alignValue": "left" }
+    },
+    {
+      "id": 12,
+      "type": "gauge",
+      "title": "Active sentinel observers (fleet)",
+      "description": "Total live sentinel observer connections the operator holds across the fleet (sum of valkey_sentinel_observer_connected). Each managed sentinel pod the operator is actively observing contributes 1; a fleet-wide drop signals the operator lost its hybrid push/pull view of one or more quorums.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 38, "w": 6, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(valkey_sentinel_observer_connected)",
+          "legendFormat": "observers"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 } }
+    }
+  ]
+}

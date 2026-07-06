@@ -1,0 +1,33 @@
+# inject-ca label + namespaceSelector exclusion + timeoutSeconds for
+# the Mutating WebhookConfiguration. Companion validating-side patch
+# in webhook_validator_label_patch.yaml — both apply the same shape
+# under different resource names.
+#
+# The inject-ca label is what the operator's dynauth Injector watches
+# to find which webhook configs to patch CABundle onto. The
+# namespaceSelector exclusion (kube-system + the operator namespace)
+# is the safety net so a webhook-down window (cert rotation, leader
+# handover, bootstrap) doesn't lock up the operator's own
+# namespace. timeoutSeconds=5 matches the chart's setting — defaulter
+# is a pure Go transform with no API calls.
+#
+# Strategic-merge: webhooks[] is keyed by `.name`, so the merge
+# preserves the kubebuilder-generated rule + clientConfig fields and
+# only adds / overwrites timeoutSeconds + namespaceSelector on the
+# matching webhook entry.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: mutating-webhook-configuration
+  labels:
+    velkir.ioxie.dev/inject-ca: "true"
+webhooks:
+  - name: mvalkey-v1beta1.kb.io
+    timeoutSeconds: 5
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - velkir-system
