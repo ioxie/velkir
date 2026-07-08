@@ -1,0 +1,46 @@
+{{ include "velkir.fullname" . }} installed.
+{{- if not (.Capabilities.APIVersions.Has "velkir.ioxie.dev/v1beta1") }}
+
+⚠  WARNING: the Valkey CRDs (velkir.ioxie.dev/v1beta1) are not present in
+   this cluster. The operator will CrashLoop until they are installed.
+   The CRDs ship as a SEPARATE chart by design (independent lifecycle) —
+   install it FIRST, then re-run this release:
+     helm upgrade --install velkir-crds \
+       oci://ghcr.io/ioxie/velkir/charts/velkir-crds \
+       --namespace {{ .Release.Namespace }}
+{{- end }}
+
+Next steps:
+  1. Install the CRDs (separate chart):
+       helm upgrade --install velkir-crds \
+         oci://ghcr.io/ioxie/velkir/charts/velkir-crds \
+         --namespace {{ .Release.Namespace }}
+
+  2. Create a Valkey resource. See the samples under docs/samples/ in
+       the velkir repository.
+
+Leader-election lease (HA operators): coordination.k8s.io/Lease in
+{{ .Release.Namespace }}.
+
+Inspect operator status:
+  kubectl -n {{ .Release.Namespace }} get deploy {{ include "velkir.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "velkir.name" . }}
+
+{{ if .Values.networkPolicy.enabled -}}
+NetworkPolicy: a default-on operator-self NetworkPolicy ships with this
+release. Ingress is bounded to the webhook, metrics, and healthz ports.
+Egress is enumerated (not allow-all): DNS (:53), the Kubernetes apiserver
+on {{ .Values.networkPolicy.apiServerPorts | join ", " }}, and the sentinel
+(:26379) / valkey (:6379) data plane on pods labelled
+app.kubernetes.io/managed-by=velkir cluster-wide. If your apiserver
+answers on a different port, add it to `networkPolicy.apiServerPorts` or
+control-plane egress is dropped and the operator wedges. Opt out of the
+policy entirely with `--set networkPolicy.enabled=false` if your cluster
+manages NetworkPolicy externally (default-deny mesh, Cilium policies
+provisioned out-of-chart).
+{{- else -}}
+NetworkPolicy: disabled. The operator pod is not network-isolated by
+this chart; ensure your cluster manages this externally (default-deny
+mesh, Cilium / Calico policies provisioned out-of-chart) before
+relying on the operator's cluster-wide secret-read scope.
+{{- end }}

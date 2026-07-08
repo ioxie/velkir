@@ -1,0 +1,39 @@
+# Build output
+bin/
+dist/
+cover.out
+cover.html
+*.test
+*.out
+
+# envtest / tool binaries
+testbin/
+tools/bin/
+
+# Generated publish artifacts (replay.py courtesy-close scripts)
+tools/publish/out/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Local secrets, drafts, scratch
+*.local.yaml
+*.local.yml
+.envrc
+
+# Helm
+*.tgz
+charts/*/charts/
+charts/*/Chart.lock
+
+# Go
+vendor/
+
+# Node (just in case)
+node_modules/

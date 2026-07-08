@@ -1,0 +1,23 @@
+# Tell kustomize to rewrite clientConfig.service.{name,namespace} on the
+# WebhookConfiguration resources when the Service is renamed / re-
+# namespaced upstream (namePrefix + namespace in config/default).
+nameReference:
+  - kind: Service
+    version: v1
+    fieldSpecs:
+      - kind: ValidatingWebhookConfiguration
+        group: admissionregistration.k8s.io
+        path: webhooks/clientConfig/service/name
+      - kind: MutatingWebhookConfiguration
+        group: admissionregistration.k8s.io
+        path: webhooks/clientConfig/service/name
+
+namespace:
+  - kind: ValidatingWebhookConfiguration
+    group: admissionregistration.k8s.io
+    path: webhooks/clientConfig/service/namespace
+    create: true
+  - kind: MutatingWebhookConfiguration
+    group: admissionregistration.k8s.io
+    path: webhooks/clientConfig/service/namespace
+    create: true

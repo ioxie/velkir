@@ -1,0 +1,45 @@
+name: Bug report
+description: Report a reproducible problem with the operator
+title: "bug: <short title>"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please do **not** use this
+        form for security vulnerabilities — report those privately via the
+        Security advisories link on the issue chooser.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The actual behaviour you observed.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: The behaviour you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Reproducer
+      description: Versions and the minimal steps to reproduce.
+      value: |
+        - Operator version:
+        - Chart version:
+        - Kubernetes version:
+        - CR manifest (redacted):
+        - Steps:
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / events / metrics
+      description: Paste any relevant excerpts.
+    validations:
+      required: false

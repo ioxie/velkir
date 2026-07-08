@@ -1,0 +1,69 @@
+suite: values.schema.json resource-quantity constraint
+# deployment.yaml pulls in configmap.yaml via an include, so both must be
+# loaded for the template to render (matches deployment_test.yaml).
+templates:
+  - deployment.yaml
+  - configmap.yaml
+tests:
+  - it: accepts the default resource quantities
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 100m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 256Mi
+
+  - it: accepts an integer cpu and a binary-suffix memory limit
+    template: deployment.yaml
+    set:
+      resources:
+        limits:
+          cpu: 2
+          memory: 1Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 1Gi
+
+  - it: rejects a typo'd quantity suffix (128MiB is not a valid Quantity)
+    # The schema's per-value pattern catches a typo'd suffix at render time
+    # rather than letting it pass the chart and fail at kubectl apply.
+    template: deployment.yaml
+    set:
+      resources:
+        requests:
+          memory: 128MiB
+    asserts:
+      - failedTemplate: {}
+
+  - it: rejects a digit after a binary suffix (1Gi2 is not a valid Quantity)
+    # The suffix branches are mutually exclusive, so a trailing digit after a
+    # unit suffix no longer slips through to a kubectl apply error.
+    template: deployment.yaml
+    set:
+      resources:
+        requests:
+          memory: 1Gi2
+    asserts:
+      - failedTemplate: {}
+
+  - it: rejects a digit after a decimal suffix (100m3 is not a valid Quantity)
+    template: deployment.yaml
+    set:
+      resources:
+        requests:
+          cpu: 100m3
+    asserts:
+      - failedTemplate: {}
+
+  - it: rejects an unknown resources key (additionalProperties false)
+    # A misspelled block (requsts) would otherwise silently apply no request.
+    template: deployment.yaml
+    set:
+      resources:
+        requsts:
+          cpu: 100m
+    asserts:
+      - failedTemplate: {}

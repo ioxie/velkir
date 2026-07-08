@@ -1,0 +1,942 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "datasource", "uid": "grafana" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Drill-down for one Valkey CR. Audience: app team. Templated on namespace + valkey CR. Variable sources are valkey_exporter_sidecar_up — an operator-stamped gauge that only lists Valkey-operator-managed pods, so unrelated redis exporters in the cluster don't pollute the dropdowns. Structured in five rows + an operator-overlay row, mirroring the community redis_exporter dashboard shape.",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "tags": ["valkey", "velkir"],
+  "links": [
+    {
+      "title": "Valkey Fleet Overview",
+      "type": "link",
+      "url": "/d/valkey-fleet-overview",
+      "targetBlank": false,
+      "icon": "dashboard"
+    },
+    {
+      "title": "Valkey Operator",
+      "type": "link",
+      "url": "/d/velkir",
+      "targetBlank": false,
+      "icon": "dashboard"
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "Prometheus", "value": "prometheus" },
+        "hide": 0,
+        "label": "Datasource",
+        "name": "DS_PROMETHEUS",
+        "query": "prometheus",
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(valkey_exporter_sidecar_up, namespace)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Namespace",
+        "multi": false,
+        "name": "namespace",
+        "options": [],
+        "query": { "query": "label_values(valkey_exporter_sidecar_up, namespace)", "refId": "namespace" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(valkey_exporter_sidecar_up{namespace=\"$namespace\"}, name)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "CR",
+        "multi": false,
+        "name": "valkey",
+        "options": [],
+        "query": { "query": "label_values(valkey_exporter_sidecar_up{namespace=\"$namespace\"}, name)", "refId": "valkey" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": { "selected": false, "text": "Loki", "value": "loki" },
+        "hide": 0,
+        "label": "Loki datasource",
+        "name": "DS_LOKI",
+        "query": "loki",
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-3h", "to": "now" },
+  "timezone": "browser",
+  "title": "Valkey Single Deployment",
+  "uid": "valkey-single-deployment",
+  "version": 4,
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Replication State",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Instance Overview",
+      "description": "Pod × role × version × maxmemory_policy table sourced from redis_instance_info. Requires PodMonitor scraping. role column color-coded by valkey_role label (primary green, replica yellow).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 1, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "redis_instance_info{namespace=\"$namespace\", valkey_instance=\"$valkey\"}",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "valkey_role" },
+            "properties": [
+              { "id": "displayName", "value": "role" },
+              {
+                "id": "mappings",
+                "value": [
+                  { "type": "value", "options": { "primary": { "color": "green", "text": "PRIMARY" } } },
+                  { "type": "value", "options": { "replica": { "color": "yellow", "text": "REPLICA" } } }
+                ]
+              },
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "redis_version" },
+            "properties": [{ "id": "displayName", "value": "version" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "maxmemory_policy" },
+            "properties": [{ "id": "displayName", "value": "maxmemory_policy" }]
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "Value": true,
+              "namespace": true,
+              "name": true,
+              "valkey_instance": true,
+              "job": true,
+              "instance": true,
+              "service": true,
+              "endpoint": true,
+              "container": true,
+              "os": true,
+              "process_id": true,
+              "run_id": true,
+              "tcp_port": true,
+              "redis_build_id": true,
+              "redis_mode": true,
+              "role": true
+            },
+            "indexByName": { "pod": 0, "valkey_role": 1, "redis_version": 2, "maxmemory_policy": 3 }
+          }
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Connected slaves (primary's POV)",
+      "description": "Number of slaves the primary reports as currently connected. Should equal replicas - 1.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 1, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(redis_connected_slaves{namespace=\"$namespace\", valkey_instance=\"$valkey\", valkey_role=\"primary\"})",
+          "legendFormat": "slaves"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Replicas: master link UP",
+      "description": "Count of replicas reporting redis_master_link_up=1. Traffic-light: green if any replica has it UP, red if all are DOWN or none scraped.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 18, "y": 1, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(redis_master_link_up{namespace=\"$namespace\", valkey_instance=\"$valkey\", valkey_role=\"replica\"} == 1) or vector(0)",
+          "legendFormat": "up"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Uptime (primary)",
+      "description": "Seconds since the primary's most recent process start. Drops to ~0 after a failover or pod restart.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 5, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(redis_uptime_in_seconds{namespace=\"$namespace\", valkey_instance=\"$valkey\", valkey_role=\"primary\"})",
+          "legendFormat": "uptime"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "graphMode": "area"
+      },
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Total keys (primary)",
+      "description": "Sum of redis_db_keys across all databases on the primary, with a trend area chart underneath.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 18, "y": 5, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(redis_db_keys{namespace=\"$namespace\", valkey_instance=\"$valkey\", valkey_role=\"primary\"})",
+          "legendFormat": "keys"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "graphMode": "area"
+      },
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Memory & Replication",
+      "gridPos": { "x": 0, "y": 9, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Memory used vs maxmemory (per pod)",
+      "description": "The `max` series renders only for pods whose Valkey CR has `spec.valkey.configuration` setting `maxmemory` to a non-zero value — CRs left at Valkey's default (0 = unlimited) are filtered out by the `> 0` post-comparison so the chart doesn't carry a flat-zero line.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (namespace, valkey_instance, pod) (redis_memory_used_bytes{namespace=\"$namespace\", valkey_instance=\"$valkey\"})",
+          "legendFormat": "{{pod}} used"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (namespace, valkey_instance, pod) (redis_memory_max_bytes{namespace=\"$namespace\", valkey_instance=\"$valkey\"}) > 0",
+          "legendFormat": "{{pod}} max"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decbytes" } }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Memory RSS vs used (per pod)",
+      "description": "Resident set size vs the working set Valkey reports. Big RSS/used gap indicates fragmentation or allocator overhead.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 10, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (namespace, valkey_instance, pod) (redis_memory_used_rss_bytes{namespace=\"$namespace\", valkey_instance=\"$valkey\"})",
+          "legendFormat": "{{pod}} rss"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (namespace, valkey_instance, pod) (redis_memory_used_bytes{namespace=\"$namespace\", valkey_instance=\"$valkey\"})",
+          "legendFormat": "{{pod}} used"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decbytes" } }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Memory fragmentation ratio (per pod)",
+      "description": "redis_mem_fragmentation_ratio = rss / used. ~1.0 is healthy; > 1.5 indicates jemalloc fragmentation worth investigating. Values < 1 mean Valkey is swapping (a different problem).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 18, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (namespace, valkey_instance, pod) (redis_mem_fragmentation_ratio{namespace=\"$namespace\", valkey_instance=\"$valkey\"})",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 },
+              { "color": "yellow", "value": 1.5 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Replication lag (seconds, per replica)",
+      "description": "redis_connected_slave_lag_seconds: seconds the replica is behind the primary's offset. Bounded by repl-backlog-size; spikes correlate with write surges or replica restarts.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 18, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "redis_connected_slave_lag_seconds{namespace=\"$namespace\", valkey_instance=\"$valkey\"}",
+          "legendFormat": "{{slave_ip}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Master link up (per replica)",
+      "description": "1 = link healthy. 0 = link broken (alert ValkeyReplicationBroken fires after 2m).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 26, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (namespace, valkey_instance, pod) (redis_master_link_up{namespace=\"$namespace\", valkey_instance=\"$valkey\", valkey_role=\"replica\"})",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Replication offset delta (bytes lagged)",
+      "description": "redis_master_repl_offset (primary's write offset) minus redis_connected_slave_offset_bytes (slave's apply offset). Spikes during write-heavy windows; sustained large values mean the replica can't keep up.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 26, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (namespace, valkey_instance) (redis_master_repl_offset{namespace=\"$namespace\", valkey_instance=\"$valkey\", valkey_role=\"primary\"}) - on(namespace, valkey_instance) group_right max by (namespace, valkey_instance, slave_ip) (redis_connected_slave_offset_bytes{namespace=\"$namespace\", valkey_instance=\"$valkey\"})",
+          "legendFormat": "{{slave_ip}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decbytes" } }
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Lazyfree pending objects (per pod)",
+      "description": "redis_lazyfree_pending_objects — depth of the background free queue. Non-zero sustained indicates lazyfree-lazy-eviction can't keep up with eviction rate; consider raising replicas, lowering maxmemory churn, or disabling lazyfree-lazy-eviction.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 32, "w": 24, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (namespace, valkey_instance, pod) (redis_lazyfree_pending_objects{namespace=\"$namespace\", valkey_instance=\"$valkey\"})",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 300,
+      "type": "row",
+      "title": "Performance",
+      "gridPos": { "x": 0, "y": 38, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Commands/sec",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 39, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (namespace, valkey_instance, pod) (rate(redis_commands_processed_total{namespace=\"$namespace\", valkey_instance=\"$valkey\"}[1m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Hit ratio",
+      "description": "keyspace_hits / (keyspace_hits + keyspace_misses) over the last 5 minutes. Sustained drops indicate cache effectiveness degradation.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 39, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (namespace, valkey_instance, pod) (rate(redis_keyspace_hits_total{namespace=\"$namespace\", valkey_instance=\"$valkey\"}[5m])) / (sum by (namespace, valkey_instance, pod) (rate(redis_keyspace_hits_total{namespace=\"$namespace\", valkey_instance=\"$valkey\"}[5m])) + sum by (namespace, valkey_instance, pod) (rate(redis_keyspace_misses_total{namespace=\"$namespace\", valkey_instance=\"$valkey\"}[5m])))",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Slow-log entries (per pod)",
+      "description": "Rate of slow-log entries. Non-zero indicates a query taking longer than the configured threshold — actionable, since slow commands block the single-threaded event loop.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 47, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (namespace, valkey_instance, pod) (rate(redis_slowlog_length{namespace=\"$namespace\", valkey_instance=\"$valkey\"}[5m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "CPU usage (sys + user, per pod)",
+      "description": "Combined user + system CPU consumption reported by Valkey itself. Approaching one full core means single-threaded event-loop saturation.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 47, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (namespace, valkey_instance, pod) (rate(redis_cpu_user_seconds_total{namespace=\"$namespace\", valkey_instance=\"$valkey\"}[5m])) + sum by (namespace, valkey_instance, pod) (rate(redis_cpu_sys_seconds_total{namespace=\"$namespace\", valkey_instance=\"$valkey\"}[5m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" } }
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Per-command p99 latency",
+      "description": "histogram_quantile(0.99, …redis_commands_latencies_usec_bucket) per command. The single most useful 'is Valkey slow and on what?' panel — buckets exist for every command the workload exercises (GET/SET/DEL/HSET/etc.).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 55, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (cmd, le) (rate(redis_commands_latencies_usec_bucket{namespace=\"$namespace\", valkey_instance=\"$valkey\"}[5m])))",
+          "legendFormat": "{{cmd}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "µs" } }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Keyspace miss-rate (per pod)",
+      "description": "rate(redis_keyspace_misses_total) — independent of hit-ratio. A sudden miss-rate spike with stable hit-ratio means total traffic jumped, not cache effectiveness changed; useful for distinguishing the two failure modes.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 55, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (namespace, valkey_instance, pod) (rate(redis_keyspace_misses_total{namespace=\"$namespace\", valkey_instance=\"$valkey\"}[5m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Container CPU usage vs CFS throttled (valkey container)",
+      "description": "cAdvisor-side view of the valkey container. The exporter-side CPU panel above reports what Valkey itself thinks it's doing; this panel reveals when the cgroup is throttling the container. Sustained throttled time with low usage means CPU limit is too tight, not that Valkey is overloaded.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 63, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"$namespace\", pod=~\"$valkey-[0-9]+\", container=\"valkey\"}[5m]))",
+          "legendFormat": "{{pod}} usage"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (pod) (rate(container_cpu_cfs_throttled_seconds_total{namespace=\"$namespace\", pod=~\"$valkey-[0-9]+\", container=\"valkey\"}[5m]))",
+          "legendFormat": "{{pod}} throttled"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" } }
+    },
+    {
+      "id": 400,
+      "type": "row",
+      "title": "Connections",
+      "gridPos": { "x": 0, "y": 71, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Connected vs blocked clients",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 72, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (namespace, valkey_instance, pod) (redis_connected_clients{namespace=\"$namespace\", valkey_instance=\"$valkey\"})",
+          "legendFormat": "{{pod}} connected"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (namespace, valkey_instance, pod) (redis_blocked_clients{namespace=\"$namespace\", valkey_instance=\"$valkey\"})",
+          "legendFormat": "{{pod}} blocked"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "New connections/sec",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 72, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (namespace, valkey_instance, pod) (rate(redis_connections_received_total{namespace=\"$namespace\", valkey_instance=\"$valkey\"}[5m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Rejected connections/sec",
+      "description": "Connections rejected because the server hit maxclients. Sustained non-zero = client misconfig or capacity wall.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 80, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (namespace, valkey_instance, pod) (rate(redis_rejected_connections_total{namespace=\"$namespace\", valkey_instance=\"$valkey\"}[5m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.0001 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Network I/O (per pod)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 80, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (namespace, valkey_instance, pod) (rate(redis_net_input_bytes_total{namespace=\"$namespace\", valkey_instance=\"$valkey\"}[5m]))",
+          "legendFormat": "{{pod}} in"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (namespace, valkey_instance, pod) (rate(redis_net_output_bytes_total{namespace=\"$namespace\", valkey_instance=\"$valkey\"}[5m]))",
+          "legendFormat": "{{pod}} out"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" } }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "ACL access-denied rate (per pod)",
+      "description": "sum by(pod) (rate(redis_acl_access_denied_*_total)). Conditionally emitted by the exporter — appears only when the workload trips ACL rules. Non-zero is a security signal: client trying to call a command its user isn't authorised for.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 88, "w": 24, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (namespace, valkey_instance, pod) (rate({__name__=~\"redis_acl_access_denied_.+_total\", namespace=\"$namespace\", valkey_instance=\"$valkey\"}[5m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.0001 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 500,
+      "type": "row",
+      "title": "Persistence & Keys",
+      "gridPos": { "x": 0, "y": 94, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "DB keys (per pod, per db)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 95, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (namespace, valkey_instance, pod, db) (redis_db_keys{namespace=\"$namespace\", valkey_instance=\"$valkey\"})",
+          "legendFormat": "{{pod}} {{db}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Evicted / expired keys",
+      "description": "Eviction rate matters when maxmemory is hit; expired rate is normal background churn unless suddenly spiking.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 95, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (namespace, valkey_instance, pod) (rate(redis_evicted_keys_total{namespace=\"$namespace\", valkey_instance=\"$valkey\"}[5m]))",
+          "legendFormat": "{{pod}} evicted"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (namespace, valkey_instance, pod) (rate(redis_expired_keys_total{namespace=\"$namespace\", valkey_instance=\"$valkey\"}[5m]))",
+          "legendFormat": "{{pod}} expired"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "RDB last-save age (per pod)",
+      "description": "Seconds since the last successful RDB snapshot. Spikes indicate disk pressure or AOF/RDB contention.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 103, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max by (namespace, valkey_instance, pod) (redis_rdb_last_save_timestamp_seconds{namespace=\"$namespace\", valkey_instance=\"$valkey\"})",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "AOF enabled / status",
+      "description": "1 = AOF persistence on; 1 = last write OK. Both red means persistence is degraded or off.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 103, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(redis_aof_enabled{namespace=\"$namespace\", valkey_instance=\"$valkey\"})",
+          "legendFormat": "AOF enabled"
+        },
+        {
+          "refId": "B",
+          "expr": "max(redis_aof_last_write_status{namespace=\"$namespace\", valkey_instance=\"$valkey\"})",
+          "legendFormat": "AOF last-write OK"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "PVC fill ratio (per pod)",
+      "description": "kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes for PVCs claimed by valkey pods in the CR's namespace. A full PVC silently corrupts AOF and is non-recoverable; treat sustained >0.85 as page-the-on-call territory.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 111, "w": 24, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "kubelet_volume_stats_used_bytes{namespace=\"$namespace\", persistentvolumeclaim=~\"data-$valkey-[0-9]+\"} / kubelet_volume_stats_capacity_bytes{namespace=\"$namespace\", persistentvolumeclaim=~\"data-$valkey-[0-9]+\"}",
+          "legendFormat": "{{persistentvolumeclaim}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.7 },
+              { "color": "red", "value": 0.85 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 600,
+      "type": "row",
+      "title": "Operator overlays",
+      "gridPos": { "x": 0, "y": 117, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "Exporter sidecars Ready",
+      "description": "Operator-side gauge. Below the pod count means at least one exporter sidecar isn't reachable → matching per-pod panels above will show 'No data' for those pods.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 118, "w": 6, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (namespace, name, pod) (valkey_exporter_sidecar_up{namespace=\"$namespace\", name=\"$valkey\"}))",
+          "legendFormat": "ready"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 25,
+      "type": "stat",
+      "title": "Sentinel observer connected",
+      "description": "Number of sentinel pods this CR's observer holds a live subscription to. Below quorum impairs failover detection.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 6, "y": 118, "w": 6, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (namespace, name, sentinel_pod) (valkey_sentinel_observer_connected{namespace=\"$namespace\", name=\"$valkey\"}))",
+          "legendFormat": "connected"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 26,
+      "type": "stat",
+      "title": "Split-brain detections (this CR, last 1h)",
+      "description": "Operator observed sentinels disagreeing on master identity for this CR. Non-zero = SRE-actionable.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 118, "w": 6, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(valkey_split_brain_detections_total{namespace=\"$namespace\", name=\"$valkey\"}[1h]))",
+          "legendFormat": "detections"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 27,
+      "type": "stat",
+      "title": "Failover-related events (this CR, last 1h)",
+      "description": "+switch-master + +reset-master + +odown events from this CR's sentinel pubsub stream over the last hour. Surfaces both natural sentinel-driven failovers and any orphan-master demotions Phase 7a issued.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 18, "y": 118, "w": 6, "h": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(valkey_sentinel_pubsub_messages_total{namespace=\"$namespace\", name=\"$valkey\", event=~\"\\\\+(switch-master|reset-master|odown)\"}[1h]))",
+          "legendFormat": "events"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 700,
+      "type": "row",
+      "title": "Topology & History",
+      "gridPos": { "x": 0, "y": 124, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 34,
+      "type": "piechart",
+      "title": "Primary vs replica pods",
+      "description": "Live pod count for the selected CR split by role (valkey_role). One primary is expected in replication/sentinel modes; the replica slice should match spec.valkey.replicas - 1. A missing primary slice — or two — flags an election anomaly that is visible faster here than in the per-pod timeseries.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 125, "w": 8, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count by (valkey_role) (redis_uptime_in_seconds{namespace=\"$namespace\", valkey_instance=\"$valkey\"})",
+          "legendFormat": "{{valkey_role}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": { "pieType": "donut", "reduceOptions": { "calcs": [ "lastNotNull" ] }, "legend": { "displayMode": "list", "placement": "right", "values": [ "value" ] } }
+    },
+    {
+      "id": 35,
+      "type": "table",
+      "title": "Recent failovers (24h, by trigger)",
+      "description": "Operator-performed master failovers for this CR in the last 24h, from increase(valkey_failovers_total[24h]) grouped by trigger (sentinel_elected | master_aware_rolling | manual). A table rather than a rate graph so the absolute count and its cause stay legible; an empty table means no failover in the window.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 8, "y": 125, "w": 16, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(valkey_failovers_total{namespace=\"$namespace\", name=\"$valkey\"}[24h])",
+          "legendFormat": "{{trigger}}",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": { "showHeader": true },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true, "__name__": true, "kind": true, "namespace": true, "name": true, "job": true, "instance": true, "container": true, "endpoint": true, "pod": true, "service": true },
+            "renameByName": { "Value": "failovers (24h)" }
+          }
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "type": "logs",
+      "title": "Recent Kubernetes Events / logs (this CR)",
+      "description": "Recent log lines mentioning this CR from the selected Loki datasource — surfaces operator Events and pod logs for the deployment without leaving the dashboard. Requires a Loki datasource carrying the cluster's Kubernetes Events (e.g. via an event exporter) and/or pod logs; with no Loki configured this single panel shows 'No data' and the rest of the dashboard is unaffected.",
+      "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+      "gridPos": { "x": 0, "y": 133, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{namespace=\"$namespace\"} |= \"$valkey\""
+        }
+      ],
+      "options": { "showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true, "sortOrder": "Descending" }
+    }
+  ]
+}

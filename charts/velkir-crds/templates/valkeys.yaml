@@ -1,0 +1,15 @@
+{{- /*
+Valkey CRD — generated from api/v1beta1/valkey_types.go via
+controller-gen. Synced into the chart by `make sync-crds-to-chart`
+(or by hand on the rare occasion the generated YAML diverges).
+The schema, CEL rules, and printer columns are owned by the Go
+markers, NOT this file — edits here would be overwritten on the
+next sync.
+*/ -}}
+{{- if .Values.crds.create }}
+{{- $crd := .Files.Get "files/valkeys.velkir.ioxie.dev.yaml" | fromYaml -}}
+{{- if .Values.crds.keep }}
+{{- $_ := set $crd.metadata "annotations" (merge (default dict $crd.metadata.annotations) (dict "helm.sh/resource-policy" "keep")) -}}
+{{- end }}
+{{ $crd | toYaml }}
+{{- end }}

@@ -1,0 +1,134 @@
+suite: operator NetworkPolicy
+templates:
+  - networkpolicy.yaml
+tests:
+  - it: renders the operator-self NetworkPolicy by default
+    asserts:
+      - isKind:
+          of: NetworkPolicy
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-velkir
+      - equal:
+          path: spec.policyTypes
+          value: [Ingress, Egress]
+
+  - it: bounds ingress to webhook, metrics, and healthz ports (one rule each)
+    # Ingress is three discrete rules so each port can carry its own `from:`
+    # peers independently. ingress[0]=webhook, ingress[1]=metrics,
+    # ingress[2]=healthz.
+    asserts:
+      - lengthEqual:
+          path: spec.ingress
+          count: 3
+      - contains:
+          path: spec.ingress[0].ports
+          content:
+            port: webhook
+            protocol: TCP
+      - contains:
+          path: spec.ingress[1].ports
+          content:
+            port: metrics
+            protocol: TCP
+      - contains:
+          path: spec.ingress[2].ports
+          content:
+            port: healthz
+            protocol: TCP
+
+  - it: defaults every ingress port to allow-from-anywhere (no from selector)
+    # With no webhookFrom / metricsFrom set, no rule carries a `from:` block;
+    # NetworkPolicy treats a missing `from` as allow-all sources.
+    asserts:
+      - notExists:
+          path: spec.ingress[0].from
+      - notExists:
+          path: spec.ingress[1].from
+      - notExists:
+          path: spec.ingress[2].from
+
+  - it: narrows the webhook ingress to networkPolicy.webhookFrom when set
+    set:
+      networkPolicy:
+        webhookFrom:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: kube-system
+    asserts:
+      - equal:
+          path: spec.ingress[0].from[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: kube-system
+      # metrics + healthz stay open — webhookFrom narrows only the webhook rule.
+      - notExists:
+          path: spec.ingress[1].from
+      - notExists:
+          path: spec.ingress[2].from
+
+  - it: narrows the metrics ingress to networkPolicy.metricsFrom when set
+    set:
+      networkPolicy:
+        metricsFrom:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: monitoring
+    asserts:
+      - equal:
+          path: spec.ingress[1].from[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: monitoring
+      # healthz is never narrowed — kubelet probes come from the node IP.
+      - notExists:
+          path: spec.ingress[2].from
+
+  - it: enumerates egress (DNS, apiserver, sentinel/valkey data plane) rather than allow-all
+    # Egress is three discrete rules, not the bare `{}` allow-all entry.
+    # egress[0]=DNS, egress[1]=apiserver, egress[2]=managed-by data plane.
+    asserts:
+      - lengthEqual:
+          path: spec.egress
+          count: 3
+      - contains:
+          path: spec.egress[1].ports
+          content:
+            port: 443
+            protocol: TCP
+      - contains:
+          path: spec.egress[1].ports
+          content:
+            port: 6443
+            protocol: TCP
+
+  - it: allows overriding the apiserver egress ports for a non-standard control plane
+    set:
+      networkPolicy:
+        apiServerPorts:
+          - 8443
+    asserts:
+      - contains:
+          path: spec.egress[1].ports
+          content:
+            port: 8443
+            protocol: TCP
+      - notContains:
+          path: spec.egress[1].ports
+          content:
+            port: 443
+            protocol: TCP
+
+  - it: rejects an empty apiServerPorts (an empty list would widen egress to allow-all)
+    # An egress rule with null ports and no peer selector matches all ports to
+    # all destinations. values.schema.json minItems:1 rejects [] at render time
+    # so a stray empty override can't silently defeat the enumerated egress.
+    set:
+      networkPolicy:
+        apiServerPorts: []
+    asserts:
+      - failedTemplate: {}
+
+  - it: skips NetworkPolicy rendering when networkPolicy.enabled is false
+    set:
+      networkPolicy:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0

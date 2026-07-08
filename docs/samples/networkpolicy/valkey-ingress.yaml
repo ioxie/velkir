@@ -1,0 +1,76 @@
+# Restricts ingress to the Valkey data-plane pods of the
+# `my-valkey` CR in the `default` namespace. Replace `my-valkey`
+# and the namespace before applying.
+#
+# The five `from:` blocks correspond to:
+#   1. Application clients labelled `velkir.ioxie.dev/client: "true"`
+#   2. Sibling sentinel pods of the same CR (PING / INFO / replication
+#      protocol commands)
+#   3. Sibling Valkey replica peers of the same CR (replication stream
+#      on port 6379 between primary and replicas)
+#   4. The operator itself (reconciler commands like CONFIG SET,
+#      INFO, REPLICAOF)
+#   5. Prometheus scraping the redis_exporter sidecar on port 9121
+#      (only relevant if `spec.metrics.enabled: true` on the CR)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-valkey-valkey-ingress
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: velkir
+      velkir.ioxie.dev/cr: my-valkey
+      velkir.ioxie.dev/component: valkey
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              velkir.ioxie.dev/client: "true"
+      ports:
+        - protocol: TCP
+          port: 6379
+
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: velkir
+              velkir.ioxie.dev/cr: my-valkey
+              velkir.ioxie.dev/component: sentinel
+      ports:
+        - protocol: TCP
+          port: 6379
+
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: velkir
+              velkir.ioxie.dev/cr: my-valkey
+              velkir.ioxie.dev/component: valkey
+      ports:
+        - protocol: TCP
+          port: 6379
+
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: velkir-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: velkir
+      ports:
+        - protocol: TCP
+          port: 6379
+
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9121

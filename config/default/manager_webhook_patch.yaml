@@ -1,0 +1,63 @@
+# Webhook + dynauth wiring for the kustomize-deployed operator. The
+# operator's setupWebhookCertProvisioning needs POD_NAMESPACE (Downward
+# API) and projected leaf-Secret volumes for both the webhook server
+# and the secure-metrics server; the cert-* flags point the manager at
+# those mount paths. Without this patch, --enable-dynamic-authority=true
+# (the default) fails on startup with an empty POD_NAMESPACE check.
+#
+# Secret names + mount paths match the chart deploy path exactly so the
+# operator binary doesn't have to special-case kustomize vs chart
+# provisioning.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  namespace: system
+spec:
+  template:
+    spec:
+      containers:
+        - name: manager
+          args:
+            - --leader-elect
+            - --health-probe-bind-address=:8081
+            - --metrics-bind-address=:8443
+            - --webhook-cert-path=/var/lib/velkir/webhook-cert
+            - --webhook-service-name=velkir-webhook-service
+            - --metrics-cert-path=/var/lib/velkir/metrics-cert
+            - --metrics-service-name=velkir-controller-manager-metrics-service
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
+            - name: metrics
+              containerPort: 8443
+              protocol: TCP
+            - name: healthz
+              containerPort: 8081
+              protocol: TCP
+          volumeMounts:
+            - name: webhook-cert
+              mountPath: /var/lib/velkir/webhook-cert
+              readOnly: true
+            - name: metrics-cert
+              mountPath: /var/lib/velkir/metrics-cert
+              readOnly: true
+      volumes:
+        # Both leaf Secrets are managed by the dynauth Authority. optional=true
+        # lets the pod start before the Authority's first reconcile pass
+        # creates each Secret; controller-runtime's certwatcher loads the
+        # cert as soon as the kubelet projects it.
+        - name: webhook-cert
+          secret:
+            secretName: velkir-webhook-cert
+            optional: true
+        - name: metrics-cert
+          secret:
+            secretName: velkir-metrics-cert
+            optional: true

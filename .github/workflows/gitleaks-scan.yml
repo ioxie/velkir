@@ -1,0 +1,128 @@
+# Reusable gitleaks secret-scan (D-8 / C-4). The single definition of the
+# gitleaks gate -- install + ruleset self-test + parity + whole-repo scan --
+# called from pr-gate.yml on pull_request and from gitleaks.yml on release tags,
+# so the scan logic, fixtures, and parity guard live in exactly one place and the
+# PR posture cannot drift from the tag posture. It is the internal-infra-string
+# backstop GitHub native secret-scanning cannot provide.
+name: gitleaks-scan
+
+on:
+  workflow_call:
+
+# Read-only: the scan needs nothing beyond checkout. No write scope anywhere.
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    # Cap the runner: the job network-fetches the gitleaks release, so a stalled
+    # download cannot hold a runner (and the caller's concurrency slot) to the 6h
+    # ceiling.
+    timeout-minutes: 10
+    env:
+      # Pin the scanner by version AND by an in-repo SHA-256 (GITLEAKS_SHA256
+      # below), so the integrity anchor lives in the repo rather than being
+      # co-fetched with the artifact. The direct binary has no license gating,
+      # unlike the gitleaks-action wrapper which requires GITLEAKS_LICENSE for
+      # org-owned repos.
+      GITLEAKS_VERSION: "8.30.1"
+      # SHA-256 of gitleaks_8.30.1_linux_x64.tar.gz; bump together with
+      # GITLEAKS_VERSION (same discipline as the SHA-pinned actions in this file).
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install gitleaks (version + in-repo SHA-256 pinned)
+        run: |
+          ver="${GITLEAKS_VERSION}"
+          tarball="gitleaks_${ver}_linux_x64.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl -fsSL -O "https://github.com/gitleaks/gitleaks/releases/download/v${ver}/${tarball}"
+          # Verify against the SHA-256 pinned in this workflow (in-repo anchor): a
+          # tampered release cannot pass without a visible diff to GITLEAKS_SHA256.
+          echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "${tarball}" gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      - name: Self-test — the ruleset fires on planted, passes clean (isolation)
+        # Proves the committed .gitleaks.toml actually detects something BEFORE a
+        # clean whole-repo scan can pass vacuously. This guard is what makes the
+        # scan meaningful on the tag-push trigger, where this is the ONLY scanner.
+        # Presence-guarded like the parity step below: a public cut that strips the
+        # planted fixtures skips the self-test rather than hard-failing on missing
+        # files; wherever the fixtures are present the ruleset-fires proof runs.
+        # Both fixtures are scanned in isolation; --redact keeps the planted token
+        # out of the run log.
+        run: |
+          if [ ! -d .github/test-fixtures/gitleaks/planted ]; then
+            echo ".github/test-fixtures/gitleaks/planted absent (public cut); skipping gitleaks self-test"
+            exit 0
+          fi
+          # gitleaks exits 0 (clean), 1 (leaks found), or >1 (scanner/config
+          # error, e.g. a .gitleaks.toml it cannot load). The planted fixture must
+          # produce EXACTLY rc=1 (ruleset matched): rc=0 means it did not fire, and
+          # any other rc is a scanner/config error — neither proves the ruleset
+          # works, so both fail here rather than being mistaken for "tripped".
+          rc=0
+          gitleaks detect --no-git --redact --no-banner \
+            --source .github/test-fixtures/gitleaks/planted \
+            --config .gitleaks.toml || rc=$?
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::planted self-test failed (rc=$rc; expected 1=leaks-found, not 0=clean or >1=scanner/config error)"
+            exit 1
+          fi
+          echo "OK: planted fixture tripped gitleaks (rc=1) as expected"
+          # The clean fixture must exit 0; any non-zero (a stray match or a config
+          # error) correctly fails the step under the shell's errexit.
+          gitleaks detect --no-git --redact --no-banner \
+            --source .github/test-fixtures/gitleaks/clean \
+            --config .gitleaks.toml
+          echo "OK: clean fixture passed gitleaks (rc=0)"
+      - name: Scan the repository for private-disclosure leaks
+        # On the public-cut mirror the cutter's host_swap has already rewritten the
+        # retained private registry/host refs to their public form. The whole-repo
+        # scan uses the shared ruleset via an extends-wrapper that adds two
+        # exclusions the committed .gitleaks.toml must NOT carry:
+        #   - the test-fixtures tree (planted secrets by design, self-tested above)
+        #   - private GitLab-CI build infra (.gitlab-ci.yml, .gitlab/): runner tags
+        #     and private-registry refs that are build config, not published output.
+        # These live in the wrapper, NOT .gitleaks.toml, because gitleaks records
+        # the --source prefix in the reported path, so a committed path allowlist
+        # would also suppress the isolated planted self-test above.
+        run: |
+          cat > gitleaks-fullrepo.toml <<'TOML'
+          [extend]
+          path = ".gitleaks.toml"
+
+          [[allowlists]]
+          description = "all test-fixtures carry planted secrets by design (gitleaks + leak-gate subtrees); each is scanned by its own job's isolation self-test, never the whole-repo scan"
+          paths = ['''^\.github/test-fixtures/''']
+
+          [[allowlists]]
+          description = "private GitLab-CI build infra (runner tags, private registry); not a public deliverable"
+          paths = ['''^\.gitlab-ci\.yml$''', '''^\.gitlab/''']
+          TOML
+          gitleaks detect --no-git --redact --no-banner \
+            --source . --config gitleaks-fullrepo.toml
+          rm -f gitleaks-fullrepo.toml
+          echo "OK: no private-disclosure leaks found"
+      - name: Parity — .gitleaks.toml stays derived from scrub_patterns.yaml
+        # Re-derive the ruleset and compare to the committed file. When the source
+        # config is present, drift FAILS the gate so the committed ruleset cannot
+        # silently grow weaker than the cutter's shared block_classes (a future PR
+        # that loosens .gitleaks.toml without regenerating is caught here). The
+        # presence guard skips this on the public cut, where tools/publish/ (and
+        # scrub_patterns.yaml) is stripped — so blocking-on-drift never breaks the
+        # public mirror.
+        run: |
+          if [ -f tools/publish/scrub_patterns.yaml ]; then
+            if ( cd tools/publish && python3 gen_gitleaks_toml.py --check "$GITHUB_WORKSPACE/.gitleaks.toml" ); then
+              echo "OK: .gitleaks.toml is in sync with scrub_patterns.yaml"
+            else
+              echo "::error::.gitleaks.toml has drifted from tools/publish/scrub_patterns.yaml; regenerate with 'cd tools/publish && python3 gen_gitleaks_toml.py > ../../.gitleaks.toml'"
+              exit 1
+            fi
+          else
+            echo "tools/publish/scrub_patterns.yaml absent (public cut); skipping parity check"
+          fi

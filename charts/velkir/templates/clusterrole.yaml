@@ -1,0 +1,123 @@
+{{/*
+Operator ClusterRole. Verbs match the kubebuilder markers in
+internal/controller/valkey_controller.go and internal/webhook/v1beta1
+plus the cert-injector subsystem. Cluster-scoped because
+the operator watches Valkey CRs across all namespaces.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "velkir.fullname" . }}-manager
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+rules:
+  # Valkey CRs (and helper SentinelQuorum) lifecycle
+  - apiGroups: ["velkir.ioxie.dev"]
+    resources: ["valkeys", "sentinelquorums"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["velkir.ioxie.dev"]
+    resources: ["valkeys/status", "sentinelquorums/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["velkir.ioxie.dev"]
+    resources: ["valkeys/finalizers", "sentinelquorums/finalizers"]
+    verbs: ["update"]
+  # Owned data-plane resources
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps", "services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # serviceaccounts: each CR gets a dedicated RBAC-less SA for its
+  # data-plane pods so they don't run as the namespace default SA. No
+  # delete — orphaned SAs are reaped by owner-reference GC, not the operator.
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Secret reads are cluster-wide because user auth Secrets live in
+  # the same namespace as the Valkey CR (which can be any namespace).
+  # Secret writes are scoped to the operator's own namespace via the
+  # namespaced Role in role.yaml (TLS Secrets owned by the cert
+  # injector). This split mirrors the actual data-flow: the operator
+  # READS user-supplied auth across namespaces, but only WRITES its
+  # own webhook-cert Secrets in its own namespace.
+  #
+  # The READ blast radius is bounded at the informer-cache layer:
+  # cmd/main.go applies a Label selector
+  # (app.kubernetes.io/managed-by=velkir) to every owned
+  # type's ListWatch, so the apiserver only ships matching objects to
+  # the operator process. RBAC grants the cluster, the cache narrows
+  # to operator-managed objects. See docs/security/rbac-audit.md
+  # ("Defense-in-depth") and docs/security/deployment-posture.md.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["patch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Events emission for the EventRecorder. client-go's newer
+  # EventBroadcaster writes to events.k8s.io/v1; the core/v1 API
+  # is kept for the legacy path. Both grants are needed.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # StorageClass read for the PVC-resize detector
+  # (lookupStorageClassForPVCs). Cluster-scoped — StorageClass is
+  # not namespaced. The watch verb is required so the
+  # controller-runtime cache can start its informer; without it,
+  # the first `r.Get(StorageClass)` blocks on cache sync forever.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  # Webhook cert injector — manages its own Secret + the CA bundle on
+  # the webhook configurations. Scoped to the configurations the
+  # injector targets via the velkir.ioxie.dev/inject-ca label selector.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations", "validatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  # cert-manager opt-in probe (dynauth.CertManagerOptedIn). The
+  # operator reads its own webhook-leaf Certificate at boot AND on
+  # every Authority reconcile pass to decide whether to skip dynauth
+  # in favour of cert-manager-managed certs. Get-only — the operator
+  # never creates or modifies cert-manager resources. Granted
+  # unconditionally; on clusters without cert-manager installed the
+  # rule has no resource type to match and is inert.
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates"]
+    verbs: ["get"]
+  # PodMonitor reconciliation for per-CR exporter scraping. The CRD
+  # is optional infrastructure — when prometheus-operator isn't
+  # installed Phase 6a short-circuits on the NoMatchError, so these
+  # verbs are dormant until the CRD lands. list/watch are deliberately
+  # omitted: the operator writes PodMonitors but doesn't run an
+  # informer for them, so no watch budget is needed.
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["podmonitors"]
+    verbs: ["get", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "velkir.fullname" . }}-manager
+  labels:
+    {{- include "velkir.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "velkir.fullname" . }}-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "velkir.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

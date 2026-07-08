@@ -1,0 +1,345 @@
+suite: operator deployment
+templates:
+  - deployment.yaml
+  - configmap.yaml
+tests:
+  - it: renders a Deployment with the release-scoped name
+    template: deployment.yaml
+    asserts:
+      - isKind:
+          of: Deployment
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-velkir
+      - equal:
+          path: spec.replicas
+          value: 1
+
+  - it: honours spec.replicas override
+    template: deployment.yaml
+    set:
+      replicas: 3
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 3
+
+  - it: derives image from repository + Chart.AppVersion when tag is empty
+    template: deployment.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "/velkir/manager:[^ ]+$"
+
+  - it: appends @digest when image.digest is set
+    template: deployment.yaml
+    # Operators set image.digest at install / upgrade time to bind the
+    # cluster pull to the exact bytes the operator was signed against
+    # (Kyverno verifyImages / cosign-policy enforcement). The helper
+    # appends the digest after the tag so admission-time policy
+    # validators can still see both signal carriers.
+    set:
+      image:
+        tag: "v0.0.0-test"
+        digest: "sha256:cafebabe0000000000000000000000000000000000000000000000000000babe"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/ioxie/velkir/manager:v0.0.0-test@sha256:cafebabe0000000000000000000000000000000000000000000000000000babe"
+
+  - it: emits no @digest suffix when image.digest is empty (default)
+    template: deployment.yaml
+    # `equal:` against the exact `repo:tag` is a fix-revert detector
+    # for the `with .Values.image.digest` guard in `_helpers.tpl` —
+    # a `notMatchRegex: "@sha256:"` would still pass if the guard
+    # were deleted and the helper rendered `repo:tag@` (trailing
+    # bare `@`).
+    set:
+      image:
+        tag: "v0.0.0-test"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/ioxie/velkir/manager:v0.0.0-test"
+
+  - it: exposes metrics, healthz, webhook ports
+    template: deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 8443
+            protocol: TCP
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: healthz
+            containerPort: 8081
+            protocol: TCP
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: webhook
+            containerPort: 9443
+            protocol: TCP
+
+  - it: ships a PSA `restricted`-compliant pod-level securityContext by default
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+
+  - it: ships a PSA `restricted`-compliant container-level securityContext by default
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: ALL
+
+  - it: lets users override the security defaults
+    template: deployment.yaml
+    set:
+      podSecurityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/operator.json
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+            - NET_RAW
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 1000
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: Localhost
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: NET_RAW
+
+  - it: keeps PSA pod-level defaults when user provides a partial podSecurityContext override
+    template: deployment.yaml
+    # Helm merges values.yaml + user overrides at the values layer
+    # before the template renders, so a single-field override (e.g.
+    # `runAsUser: 12345` to align with a custom-built image) lands on
+    # top of the chart's defaults rather than replacing them. This
+    # spec pins that contract — a future template change to a
+    # `replace` shape (e.g. nested `with` blocks per field) would
+    # silently drop the defaults under partial overrides and fail
+    # this test.
+    set:
+      podSecurityContext:
+        runAsUser: 12345
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 12345
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+
+  - it: keeps PSA container-level defaults when user provides a partial securityContext override
+    template: deployment.yaml
+    # Same shape as the pod-level partial-override test: pinning the
+    # values-layer merge so a future template change can't silently
+    # drop capabilities-drop or seccomp defaults under a one-field
+    # user override.
+    set:
+      securityContext:
+        readOnlyRootFilesystem: false
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: ALL
+
+  - it: disables kubelet token automount on the operator pod
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+
+  - it: projects a bound SA token + ca.crt + namespace at the in-cluster path
+    template: deployment.yaml
+    # Replaces the kubelet's legacy automount (disabled above) with a
+    # bound, expiring projected token so client-go's
+    # rest.InClusterConfig keeps working without a long-lived token
+    # sitting on disk for a compromised pod to replay.
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: kube-api-access
+            mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: kube-api-access
+            projected:
+              defaultMode: 420
+              sources:
+                - serviceAccountToken:
+                    expirationSeconds: 3607
+                    path: token
+                - configMap:
+                    name: kube-root-ca.crt
+                    items:
+                      - key: ca.crt
+                        path: ca.crt
+                - downwardAPI:
+                    items:
+                      - fieldRef:
+                          apiVersion: v1
+                          fieldPath: metadata.namespace
+                        path: namespace
+
+  - it: caps operator-pod CPU draw under bursty reconciles via resources.limits.cpu
+    template: deployment.yaml
+    # The pod is Burstable (requests != limits on cpu+memory) — the
+    # right QoS profile for a controller with variable reconcile load,
+    # since requests==limits would artificially throttle a manager
+    # that's actively reconciling a cluster-wide event. The CPU limit
+    # exists to bound worst-case draw under a reconcile storm so
+    # co-tenant pods don't starve, and to give HPA / VPA tooling an
+    # upper bound to scale against.
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+          value: 500m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 256Mi
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 100m
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.memory
+          value: 128Mi
+
+  - it: omits --enable-dynamic-authority when certManager is disabled (default; dynauth on by flag default)
+    template: deployment.yaml
+    # The flag default in cmd/main.go is true; omitting the arg keeps the
+    # operator on the dynauth path. Asserting absence here is a fix-revert
+    # detector for the cert-manager gate accidentally rendering the flag
+    # under selfSigned mode.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --enable-dynamic-authority=false
+
+  - it: emits --enable-dynamic-authority=false when certManager is enabled
+    template: deployment.yaml
+    set:
+      webhook:
+        certManager:
+          enabled: true
+        selfSigned:
+          enabled: false
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --enable-dynamic-authority=false
+
+  - it: renders the dynauth cert-bootstrap init container in selfSigned mode (default)
+    template: deployment.yaml
+    asserts:
+      - exists:
+          path: spec.template.spec.initContainers
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: cert-bootstrap
+      - contains:
+          path: spec.template.spec.initContainers[0].args
+          content: --bootstrap-only
+      # Init mounts the same projected cert volumes as the main
+      # container; the waitForProjectedFile path in --bootstrap-only
+      # mode polls these mounts for kubelet's projection to land.
+      - equal:
+          path: spec.template.spec.initContainers[0].volumeMounts[0].name
+          value: webhook-cert
+      - equal:
+          path: spec.template.spec.initContainers[0].volumeMounts[1].name
+          value: metrics-cert
+
+  - it: omits the cert-bootstrap init container in cert-manager mode
+    template: deployment.yaml
+    # cert-manager pre-mints the leaf Secret before the pod schedules,
+    # so no init-side bootstrap is needed. A fix-revert detector
+    # against an accidental shape that renders the init unconditionally.
+    set:
+      webhook:
+        certManager:
+          enabled: true
+        selfSigned:
+          enabled: false
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  - it: rejects enabling both cert sources (two CABundle injectors would race)
+    template: deployment.yaml
+    # values.schema.json oneOf requires exactly one of certManager.enabled /
+    # selfSigned.enabled to be true; both-true is rejected at render time.
+    set:
+      webhook:
+        certManager:
+          enabled: true
+        selfSigned:
+          enabled: true
+    asserts:
+      - failedTemplate: {}
+
+  - it: rejects disabling both cert sources — selfSigned.enabled gates the dynauth path, not a no-op
+    template: deployment.yaml
+    # Pre-fix the dynauth init container gated off `not certManager.enabled`,
+    # so selfSigned.enabled=false was silently ignored (the knob did nothing).
+    # The schema's oneOf now requires exactly one cert source, so both-false is
+    # rejected — proving selfSigned.enabled is load-bearing. Fix-revert detector
+    # for the gate (deployment.yaml) + schema (oneOf) change together.
+    set:
+      webhook:
+        certManager:
+          enabled: false
+        selfSigned:
+          enabled: false
+    asserts:
+      - failedTemplate: {}
+
+  - it: rejects webhook.enabled=false (the admission webhook is mandatory)
+    template: deployment.yaml
+    # The manager serves :9443 unconditionally and the webhook enforces
+    # load-bearing invariants, so disabling it would leave a half-configured
+    # install. The chart fails the render rather than ship that footgun.
+    set:
+      webhook:
+        enabled: false
+    asserts:
+      - failedTemplate:
+          errorMessage: "webhook.enabled=false is not supported: the operator always serves its admission webhook on :9443 (it enforces the timing-floor, IP-only addressing, and sentinel.masterName-immutability invariants) and cannot run without it. Leave webhook.enabled=true; use webhook.certManager.enabled to choose the certificate source."

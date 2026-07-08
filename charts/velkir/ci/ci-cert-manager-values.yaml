@@ -1,0 +1,9 @@
+# ct (chart-testing) matrix entry — webhook certs provisioned via the
+# cert-manager integration path. Requires cert-manager already installed in
+# the target kind cluster.
+webhook:
+  enabled: true
+  certManager:
+    enabled: true
+  selfSigned:
+    enabled: false

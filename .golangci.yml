@@ -1,0 +1,90 @@
+version: "2"
+run:
+  allow-parallel-runners: true
+linters:
+  default: none
+  enable:
+    - copyloopvar
+    - dupl
+    - errcheck
+    - ginkgolinter
+    - goconst
+    - gocyclo
+    - goheader
+    - govet
+    - ineffassign
+    - lll
+    - modernize
+    - misspell
+    - nakedret
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+    # Operator-specific analyzers (plugin: tools/gcl). Enabling the plugin
+    # name pulls in all three analyzers (ssa_use_helper,
+    # no_unbounded_client_call, events_catalog_membership).
+    - velkir-lints
+  settings:
+    custom:
+      velkir-lints:
+        type: module
+        description: >-
+          Three analyzers for operator-specific invariants: SSA-helper
+          enforcement, bounded client.List calls, and events catalog
+          membership. Ships via .custom-gcl.yml; only active when running
+          the custom-gcl binary (stock golangci-lint ignores this block).
+    goheader:
+      # Year is a 4-digit regexp so existing "Copyright 2026." headers and any
+      # future year both match; the rest is the exact Apache 2.0 block already
+      # used across the tree. goheader skips testdata/ and generated files.
+      values:
+        regexp:
+          year: '\d{4}'
+      template: |-
+        Copyright {{ year }}.
+
+        Licensed under the Apache License, Version 2.0 (the "License");
+        you may not use this file except in compliance with the License.
+        You may obtain a copy of the License at
+
+            http://www.apache.org/licenses/LICENSE-2.0
+
+        Unless required by applicable law or agreed to in writing, software
+        distributed under the License is distributed on an "AS IS" BASIS,
+        WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+        See the License for the specific language governing permissions and
+        limitations under the License.
+    revive:
+      rules:
+        - name: comment-spacings
+        - name: import-shadowing
+    modernize:
+      disable:
+        - omitzero
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - lll
+        path: api/*
+      - linters:
+          - dupl
+          - lll
+        path: internal/*
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

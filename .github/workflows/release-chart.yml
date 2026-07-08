@@ -1,0 +1,173 @@
+# Chart release (chart-v* tag): package BOTH Helm charts (velkir-crds and
+# velkir) at the tagged commit, fail closed unless each Chart.yaml version
+# equals the tag's X.Y.Z, push both as OCI artifacts to GHCR, then sign each
+# pushed chart by digest with keyless cosign (the workflow's OIDC identity;
+# the signature is recorded in the public Sigstore transparency log) and
+# attach GitHub build provenance over the same digests.
+#
+# chart-v* is its own tag namespace: charts release independently of the
+# operator image (v* tags), so a chart-template fix ships without cutting a
+# binary release and vice versa. Both charts share one version stream — a
+# single chart-vX.Y.Z tag releases both at that version, and the version
+# assert refuses to publish when a Chart.yaml was not bumped to match, so a
+# stale chart version can never ship under a fresh tag.
+#
+# Every step that pushes, signs, or attests is guarded on the canonical
+# repository, so a fork carrying this workflow cannot publish artifacts.
+name: release-chart
+
+on:
+  push:
+    tags:
+      - 'chart-v*'
+
+# Read-only by default; the release job elevates only the scopes the
+# push/sign/attest path needs (least privilege).
+permissions:
+  contents: read
+
+# Serialize runs per tag; never cancel an in-flight release — an interrupted
+# run could leave a pushed-but-unsigned chart in the registry.
+concurrency:
+  group: release-chart-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout
+      id-token: write # OIDC token for keyless signing + provenance
+      packages: write # helm push + signature upload to GHCR
+      attestations: write # store the build-provenance attestations
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Helm
+        # Pinned to the same version as the pr-gate chart gate so the packaged
+        # artifact comes from the exact helm the gate validated against.
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.18.4
+
+      - name: Assert chart versions match the tag
+        id: version
+        # Fail-closed mismatch guard: the tag must be chart-vX.Y.Z (GA SemVer,
+        # no pre-release suffix — only finished releases are published here)
+        # and BOTH Chart.yaml versions must equal its X.Y.Z; a tag on an
+        # unbumped chart aborts before anything is pushed.
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#chart-v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '${GITHUB_REF_NAME}' is not chart-vX.Y.Z (GA SemVer); refusing to release"
+            exit 1
+          fi
+          for chart in velkir-crds velkir; do
+            chart_version=$(helm show chart "charts/${chart}" | awk '/^version:/ {print $2}')
+            if [ "$chart_version" != "$version" ]; then
+              echo "::error::charts/${chart} version '${chart_version}' does not match tag version '${version}'; bump Chart.yaml before tagging"
+              exit 1
+            fi
+          done
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Package both charts
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          helm package charts/velkir-crds --destination dist
+          helm package charts/velkir --destination dist
+
+      - name: Log in to GHCR (Helm registry config)
+        if: github.repository == 'ioxie/velkir'
+        # helm push authenticates through Helm's own registry config, written
+        # here from the ephemeral workflow token (stdin, never on argv).
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$REGISTRY_TOKEN" | helm registry login ghcr.io --username "$REGISTRY_USER" --password-stdin
+
+      - name: Log in to GHCR (Docker credential store)
+        if: github.repository == 'ioxie/velkir'
+        # cosign resolves registry credentials through the Docker credential
+        # store, not Helm's registry config, so the signature upload needs
+        # this second login with the same ephemeral token.
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push velkir-crds chart
+        id: push-crds
+        if: github.repository == 'ioxie/velkir'
+        # helm push prints the pushed artifact's digest ("Digest: sha256:…") —
+        # the only machine-readable handle on it — captured so sign and attest
+        # bind to the exact bytes this run pushed, not a mutable tag lookup.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          helm push "dist/velkir-crds-${VERSION}.tgz" oci://ghcr.io/ioxie/velkir/charts 2>&1 | tee push-crds.log
+          digest=$(awk '/Digest:/{print $2; exit}' push-crds.log)
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::could not capture the velkir-crds chart digest from helm push output"
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Push velkir chart
+        id: push-operator
+        if: github.repository == 'ioxie/velkir'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          helm push "dist/velkir-${VERSION}.tgz" oci://ghcr.io/ioxie/velkir/charts 2>&1 | tee push-operator.log
+          digest=$(awk '/Digest:/{print $2; exit}' push-operator.log)
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::could not capture the velkir chart digest from helm push output"
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        if: github.repository == 'ioxie/velkir'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign both charts by digest (keyless)
+        if: github.repository == 'ioxie/velkir'
+        # cosign exchanges the job's OIDC token for a short-lived certificate
+        # bound to this workflow identity; the signature lands in the public
+        # transparency log. Verify with:
+        #   cosign verify \
+        #     --certificate-identity-regexp '^https://github.com/ioxie/velkir/' \
+        #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+        #     ghcr.io/ioxie/velkir/charts/<chart>@<digest>
+        env:
+          CRDS_DIGEST: ${{ steps.push-crds.outputs.digest }}
+          OPERATOR_DIGEST: ${{ steps.push-operator.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "ghcr.io/ioxie/velkir/charts/velkir-crds@${CRDS_DIGEST}"
+          cosign sign --yes "ghcr.io/ioxie/velkir/charts/velkir@${OPERATOR_DIGEST}"
+
+      - name: Attest build provenance (velkir-crds chart)
+        if: github.repository == 'ioxie/velkir'
+        # Build provenance bound to this workflow run, recorded in the repo's
+        # attestation store; verify with `gh attestation verify`.
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ghcr.io/ioxie/velkir/charts/velkir-crds
+          subject-digest: ${{ steps.push-crds.outputs.digest }}
+
+      - name: Attest build provenance (velkir chart)
+        if: github.repository == 'ioxie/velkir'
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ghcr.io/ioxie/velkir/charts/velkir
+          subject-digest: ${{ steps.push-operator.outputs.digest }}

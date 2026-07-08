@@ -1,0 +1,35 @@
+# A minimal, copy-pasteable Valkey CR: a 3-replica replication-mode cluster
+# (one primary + two replicas) with operator-driven failover and persistent
+# storage. Apply with `kubectl apply -f docs/samples/valkey-replication.yaml`.
+# See the docs/ reference for the full spec surface and the other modes
+# (standalone, sentinel).
+apiVersion: velkir.ioxie.dev/v1beta1
+kind: Valkey
+metadata:
+  name: valkey-replication
+  namespace: default
+spec:
+  mode: replication
+  # The image is optional — the defaulting webhook stamps repository + tag when
+  # unset. Pin it explicitly to control the version:
+  image:
+    valkey:
+      repository: valkey
+      tag: "8.0"
+  valkey:
+    replicas: 3
+    persistence:                       # required in replication mode
+      size: 10Gi
+      # storageClass: <your-storage-class>   # omit to use the cluster default
+    resources:
+      requests:
+        cpu: 200m
+        memory: 1Gi
+      limits:
+        memory: 2Gi
+  # PVCs survive CR deletion by default; set to Delete to reclaim on teardown.
+  pvcRetentionPolicy: Retain
+  # Reference an existing Secret for the default-user password (optional):
+  # auth:
+  #   secretName: valkey-auth          # Secret holding the password
+  #   secretKey: password              # key within the Secret (default: password)

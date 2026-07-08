@@ -1,0 +1,23 @@
+# Validating-side companion to webhook_label_patch.yaml — same
+# inject-ca label + namespaceSelector + 5s timeout shape, applied to
+# the ValidatingWebhookConfiguration. failurePolicy=Fail (set in
+# config/webhook/manifests.yaml from the kubebuilder marker) is what
+# makes the namespaceSelector exclusion load-bearing: without it, a
+# webhook-down window would block CR CRUD in the operator's own
+# namespace, including the operator's own CRs.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-webhook-configuration
+  labels:
+    velkir.ioxie.dev/inject-ca: "true"
+webhooks:
+  - name: vvalkey-v1beta1.kb.io
+    timeoutSeconds: 5
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - velkir-system

@@ -1,0 +1,140 @@
+suite: metrics-rbac.yaml — SA-token + role bindings for secure metrics scrape
+templates:
+  - metrics-rbac.yaml
+tests:
+  # The secure :8443 endpoint is exposed on every install, so the
+  # server-side auth-delegator binding must render even when no
+  # ServiceMonitor is configured. Gating it behind serviceMonitor.enabled
+  # left a default install's authn filter unable to create TokenReviews,
+  # so every scrape returned "500 Authentication failed" (#564). This is
+  # the regression pin: on a default install exactly the auth-delegator
+  # binding renders, and nothing else.
+  - it: renders only the auth-delegator binding on a default install (serviceMonitor disabled)
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: ClusterRoleBinding
+        documentIndex: 0
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-velkir-auth-delegator
+        documentIndex: 0
+      - equal:
+          path: roleRef.name
+          value: system:auth-delegator
+        documentIndex: 0
+      - equal:
+          path: subjects[0].kind
+          value: ServiceAccount
+        documentIndex: 0
+      - equal:
+          path: subjects[0].name
+          value: RELEASE-NAME-velkir
+        documentIndex: 0
+
+  - it: renders auth-delegator binding + metrics-reader ClusterRole + binding + SA-token Secret when serviceMonitor enabled
+    set:
+      metrics:
+        serviceMonitor:
+          enabled: true
+    asserts:
+      - hasDocuments:
+          count: 4
+
+  # The auth-delegator binding is the load-bearing piece: without it
+  # the operator's SA cannot call TokenReview/SubjectAccessReview
+  # against the apiserver to validate Bearer tokens that a scraper
+  # presents, and every scrape returns 500 (authn fails closed) before
+  # authorization is even consulted. It must render regardless of the
+  # ServiceMonitor — verified here in the serviceMonitor-enabled layout
+  # (the default-install case is pinned by the first test above).
+  - it: binds system:auth-delegator to the operator SA (server-side TokenReview/SAR auth)
+    set:
+      metrics:
+        serviceMonitor:
+          enabled: true
+    documentIndex: 0
+    asserts:
+      - isKind:
+          of: ClusterRoleBinding
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-velkir-auth-delegator
+      - equal:
+          path: roleRef.apiGroup
+          value: rbac.authorization.k8s.io
+      - equal:
+          path: roleRef.kind
+          value: ClusterRole
+      - equal:
+          path: roleRef.name
+          value: system:auth-delegator
+      - equal:
+          path: subjects[0].kind
+          value: ServiceAccount
+      - equal:
+          path: subjects[0].name
+          value: RELEASE-NAME-velkir
+      - equal:
+          path: subjects[0].namespace
+          value: NAMESPACE
+
+  - it: metrics-reader ClusterRole grants nonResourceURLs /metrics get only
+    set:
+      metrics:
+        serviceMonitor:
+          enabled: true
+    documentIndex: 1
+    asserts:
+      - isKind:
+          of: ClusterRole
+      - equal:
+          path: rules
+          value:
+            - nonResourceURLs: ["/metrics"]
+              verbs: ["get"]
+
+  - it: metrics-reader ClusterRoleBinding subjects the operator SA
+    set:
+      metrics:
+        serviceMonitor:
+          enabled: true
+    documentIndex: 2
+    asserts:
+      - isKind:
+          of: ClusterRoleBinding
+      - equal:
+          path: roleRef.apiGroup
+          value: rbac.authorization.k8s.io
+      - equal:
+          path: roleRef.kind
+          value: ClusterRole
+      - equal:
+          path: roleRef.name
+          value: RELEASE-NAME-velkir-metrics-reader
+      - equal:
+          path: subjects[0].kind
+          value: ServiceAccount
+      - equal:
+          path: subjects[0].name
+          value: RELEASE-NAME-velkir
+      - equal:
+          path: subjects[0].namespace
+          value: NAMESPACE
+
+  - it: long-lived SA-token Secret annotated to the operator SA
+    set:
+      metrics:
+        serviceMonitor:
+          enabled: true
+    documentIndex: 3
+    asserts:
+      - isKind:
+          of: Secret
+      - equal:
+          path: type
+          value: kubernetes.io/service-account-token
+      - equal:
+          path: metadata.annotations["kubernetes.io/service-account.name"]
+          value: RELEASE-NAME-velkir

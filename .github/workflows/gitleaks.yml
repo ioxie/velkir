@@ -1,0 +1,27 @@
+# Release-tag secret-scan (D-8). Runs the shared gitleaks-scan reusable workflow
+# (install + ruleset self-test + parity + whole-repo scan) on every v* / chart-v*
+# tag push -- the trigger pr-gate.yml does not cover. PR-time gitleaks coverage is
+# provided by pr-gate.yml, which calls the SAME reusable workflow, so a
+# private-disclosure token cannot slip in via a tag push and the two triggers can
+# never drift (one scan definition, in gitleaks-scan.yml).
+name: gitleaks
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - 'chart-v*'
+
+# Read-only: the scan needs nothing beyond checkout. No write scope anywhere.
+permissions:
+  contents: read
+
+# A re-pushed tag supersedes its own in-flight scan; distinct tags hash to
+# distinct groups, so two releases never cancel each other.
+concurrency:
+  group: gitleaks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secret-scan:
+    uses: ./.github/workflows/gitleaks-scan.yml

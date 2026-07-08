@@ -1,0 +1,50 @@
+# Operator-self PodMonitor — scrapes the velkir controller's
+# own metrics endpoint.
+#
+# Unlike the exporter PodMonitors in this directory, the operator's
+# metrics endpoint serves HTTPS on :8443 (container port name "metrics")
+# and is authenticated: every scrape must present a bearer token whose
+# ServiceAccount has /metrics access, and the leaf cert is signed by the
+# in-cluster operator CA. This sample therefore carries the scheme / TLS
+# / bearer-token config the secure endpoint requires.
+#
+# Prefer the chart's built-in operator-self ServiceMonitor
+# (metrics.serviceMonitor.enabled=true) when you install with Helm — it
+# templates the same config and tracks the release name and namespace
+# automatically. Use this PodMonitor only for non-Helm installs, or when
+# your Prometheus discovers PodMonitors but not ServiceMonitors.
+#
+# Adjust the release name (velkir) and namespace
+# (velkir-system) if you installed under different names: the
+# bearerTokenSecret, ca secret, and serverName all derive from them.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: velkir
+  namespace: velkir-system
+  labels:
+    release: prometheus   # set to your Prometheus's monitor-discovery label
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: velkir
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      scheme: https
+      # The operator stamps namespace/pod/name on every per-CR gauge to
+      # point at the watched CR; honorLabels keeps those rather than
+      # overwriting them with the scrape target's own pod labels.
+      honorLabels: true
+      bearerTokenSecret:
+        name: velkir-metrics-token
+        key: token
+      tlsConfig:
+        ca:
+          secret:
+            name: velkir-webhook-ca
+            key: ca.crt
+        # Must match the SAN baked into the metrics leaf cert, which is
+        # built from the metrics Service short name.
+        serverName: velkir-metrics.velkir-system.svc

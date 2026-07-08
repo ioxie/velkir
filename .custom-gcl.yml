@@ -1,0 +1,14 @@
+# Custom golangci-lint build manifest. `golangci-lint custom` reads this file
+# and compiles a new binary with the listed plugins wired in.
+#
+# Output: ./bin/custom-gcl. Makefile (lint target) and CI build this binary
+# and invoke it instead of the stock golangci-lint so the operator-specific
+# analyzers (ssa-use-helper, no-unbounded-client-call, events-catalog-membership)
+# run alongside the standard linter set.
+version: v2.8.0
+name: custom-gcl
+destination: ./bin
+plugins:
+  - module: github.com/ioxie/velkir/tools/gcl
+    import: github.com/ioxie/velkir/tools/gcl
+    path: ./tools/gcl

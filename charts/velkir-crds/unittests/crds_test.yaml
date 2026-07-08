@@ -1,0 +1,81 @@
+suite: crds
+tests:
+  - it: renders the Valkey CRD by default
+    template: valkeys.yaml
+    asserts:
+      - isKind:
+          of: CustomResourceDefinition
+      - equal:
+          path: metadata.name
+          value: valkeys.velkir.ioxie.dev
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+      - equal:
+          path: spec.group
+          value: velkir.ioxie.dev
+      - equal:
+          path: spec.versions[0].name
+          value: v1beta1
+
+  - it: renders the SentinelQuorum CRD by default
+    template: sentinelquorums.yaml
+    asserts:
+      - isKind:
+          of: CustomResourceDefinition
+      - equal:
+          path: metadata.name
+          value: sentinelquorums.velkir.ioxie.dev
+
+  - it: omits CRDs when crds.create is false
+    template: valkeys.yaml
+    set:
+      crds.create: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: drops the keep annotation when crds.keep is false
+    template: valkeys.yaml
+    set:
+      crds.keep: false
+    asserts:
+      # The generated CRD always carries controller-gen's
+      # annotation, so assert the keep key specifically is absent
+      # rather than the whole annotations map.
+      - isNull:
+          path: metadata.annotations["helm.sh/resource-policy"]
+
+  - it: NOTES warns about keep semantics on default install
+    template: NOTES.txt
+    asserts:
+      - matchRegexRaw:
+          pattern: "helm\\.sh/resource-policy: keep"
+      - matchRegexRaw:
+          pattern: "kubectl delete crd valkeys\\.velkir\\.ioxie\\.dev sentinelquorums\\.velkir\\.ioxie\\.dev"
+      - matchRegexRaw:
+          pattern: "--set crds\\.keep=false"
+
+  - it: NOTES warns about cascade-delete when crds.keep is false
+    template: NOTES.txt
+    set:
+      crds.keep: false
+    asserts:
+      - matchRegexRaw:
+          pattern: "do NOT carry .helm\\.sh/resource-policy: keep."
+      - matchRegexRaw:
+          pattern: "cascade-deletes every"
+      - notMatchRegexRaw:
+          pattern: "--set crds\\.keep=false"
+
+  - it: NOTES tells user to install CRDs out-of-band when crds.create is false
+    template: NOTES.txt
+    set:
+      crds.create: false
+    asserts:
+      - matchRegexRaw:
+          pattern: "crds\\.create=false"
+      - matchRegexRaw:
+          pattern: "out-of-band"
+      - notMatchRegexRaw:
+          pattern: "helm\\.sh/resource-policy: keep"

@@ -1,0 +1,34 @@
+suite: operator config ConfigMap
+templates:
+  - configmap.yaml
+tests:
+  - it: omits watchNamespaces by default (cluster-scoped operator)
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: watchNamespaces
+
+  - it: renders watchNamespaces entries when set
+    set:
+      watchNamespaces:
+        - op-ns
+        - test-ns
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'watchNamespaces:'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '- "op-ns"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '- "test-ns"'
+
+  - it: keeps the leader-election keys rendered alongside watchNamespaces
+    set:
+      watchNamespaces:
+        - op-ns
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'leaseDuration: "30s"'

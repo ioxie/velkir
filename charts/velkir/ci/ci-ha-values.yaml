@@ -1,0 +1,4 @@
+# ct (chart-testing) HA matrix entry — two-replica operator with leader election.
+replicas: 2
+leaderElection:
+  enabled: true

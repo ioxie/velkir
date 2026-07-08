@@ -1,0 +1,59 @@
+apiVersion: v2
+name: velkir
+description: Operator for Valkey + Sentinel HA clusters
+type: application
+
+# Bump on any chart-template / values.yaml change before retagging — Harbor
+# enforces tag immutability, so a release tag without a chart bump will
+# fail the chart push with a 412 once this version is already in the registry.
+version: 0.1.1
+# appVersion is the operator image tag this chart deploys. Pin
+# explicitly when bumping the chart (the chart-version convention — chart and
+# image release independently, so the chart bumper picks which image
+# version this chart targets). Must reference an image tag that exists
+# in Harbor with full attestations.
+appVersion: "v0.1.1"
+kubeVersion: ">=1.30.0-0"
+
+
+keywords:
+  - valkey
+  - sentinel
+  - replication
+  - operator
+  - kubernetes-operator
+  - high-availability
+  - database
+
+maintainers:
+  - name: ioxie
+    email: platform@ioxie.dev
+
+annotations:
+  artifacthub.io/category: database
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/operator: "true"
+  artifacthub.io/operatorCapabilities: "Seamless Upgrades"
+  artifacthub.io/links: |
+    - name: Source
+      url: https://github.com/ioxie/velkir
+    - name: Installation guide
+      url: https://github.com/ioxie/velkir/blob/main/docs/install.md
+    - name: Changelog
+      url: https://github.com/ioxie/velkir/blob/main/docs/CHANGELOG.md
+    - name: Trademark notice
+      url: https://github.com/ioxie/velkir/blob/main/TRADEMARKS.md
+  # The canonical non-affiliation disclaimer (TRADEMARKS.md) — keep this
+  # copy byte-identical to the others.
+  velkir.ioxie.dev/trademark-disclaimer: "Velkir is an independent project. It is not affiliated with, endorsed by, or sponsored by the Valkey project, LF Projects, LLC, or the Linux Foundation."
+  artifacthub.io/crds: |
+    - kind: Valkey
+      version: v1beta1
+      name: valkeys.velkir.ioxie.dev
+      displayName: Valkey
+      description: Valkey deployment (standalone, replication, or sentinel mode)
+    - kind: SentinelQuorum
+      version: v1beta1
+      name: sentinelquorums.velkir.ioxie.dev
+      displayName: SentinelQuorum
+      description: Sentinel quorum helper (populated by sentinel pods)

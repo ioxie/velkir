@@ -1,0 +1,437 @@
+# Public-cut pull-request gate. C-1 establishes the security envelope for the
+# linear pr-gate chain: the plain pull_request trigger only -- never the
+# privileged fork-context variant that would let a fork PR run with repo write
+# scope -- plus least-privilege contents: read at the top level, and SHA-pinned
+# actions. The first gate
+# builds the repo's custom golangci-lint and runs it so the operator-specific
+# analyzers (ssa-use-helper, no-unbounded-client-call, events-catalog-membership)
+# fire alongside the standard linter set. Subsequent chain jobs (C-2..) attach
+# to this same workflow.
+#
+# C-2 adds the Go functional gate (unit / envtest / crd-additive / govulncheck),
+# replicating the GitLab Tier-1 Go gate so the public gate is no weaker.
+#
+# C-3 adds the chart gate (helm lint / helm unittest both charts / ct lint /
+# promtool rules-tests), mirroring the GitLab chart-lint job, pinned to the same
+# HELM_VERSION (v3.18.4) and PROMTOOL_VERSION (3.1.0).
+#
+# C-4 adds the gitleaks secret-scan gate: a committed .gitleaks.toml generated
+# from the shared tools/publish/scrub_patterns.yaml block_classes (the single
+# ruleset the tag-time scan reuses), a version-pinned + checksum-verified
+# gitleaks binary scanning the repo, and committed planted/clean fixtures the
+# job self-tests in isolation to prove the ruleset actually fires.
+#
+# C-5 adds the leak-gate job: runs the shared stdlib content-aware
+# tools/publish/leak_gate.py over the published tree as a process-disclosure
+# regression backstop (catching private tokens the gitleaks regex set might
+# miss), with committed planted/clean fixtures self-tested in isolation.
+#
+# C-6 adds the dco job: a pure-shell/git check (no Node) requiring a well-formed
+# Signed-off-by trailer on every non-merge commit, matched against the raw body
+# identically to replay.py's verify_dco so a sign-off that passes the gate
+# replays cleanly; self-tested against well-formed/folded/malformed/unsigned
+# commits.
+name: pr-gate
+
+on:
+  pull_request: {}
+
+# Read-only by default. Each job elevates only the scopes it needs; every job
+# here needs nothing beyond checkout, so all inherit contents: read.
+permissions:
+  contents: read
+
+# Cancel superseded runs for the same PR; a new push invalidates the old gate.
+concurrency:
+  group: pr-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build custom golangci-lint and run analyzers
+        # `golangci-lint custom` compiles the tools/gcl analyzer plugins listed
+        # in .custom-gcl.yml into ./bin/custom-gcl (not the marketplace action),
+        # so the operator-specific analyzers run with the standard linters.
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.8.0
+          golangci-lint custom
+          ./bin/custom-gcl run ./...
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Unit tests
+        # Excludes the packages whose tests spin up envtest (they run in the
+        # dedicated envtest job) and the build-tagged e2e suite.
+        run: |
+          pkgs=$(go list ./... | grep -Ev '/(internal/controller|internal/util/ssa|test/e2e)$')
+          if [ -z "$pkgs" ]; then
+            echo "no pure-Go packages to unit-test yet"
+            exit 0
+          fi
+          go test $pkgs -count=1
+
+  envtest:
+    runs-on: ubuntu-latest
+    env:
+      ENVTEST_K8S_VERSION: "1.30.0"
+      CONTROLLER_RUNTIME_VERSION: v0.24.0
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: envtest suite
+        run: |
+          go install "sigs.k8s.io/controller-runtime/tools/setup-envtest@${CONTROLLER_RUNTIME_VERSION}"
+          mkdir -p bin
+          export KUBEBUILDER_ASSETS="$(setup-envtest use "$ENVTEST_K8S_VERSION" --bin-dir "$(pwd)/bin" -p path)"
+          go test $(go list ./... | grep -v /e2e) -coverprofile cover.out
+
+  crd-additive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Full history so the PR base commit is available as the apidiff
+          # baseline worktree below.
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: crd-additive apidiff gate
+        # Snapshot the API at the PR base, diff the head against it, and fail on
+        # an incompatible CRD change unless the PR is labelled breaking-change.
+        # v1beta1 allows breaks, but only with that explicit acknowledgement.
+        run: |
+          go install golang.org/x/exp/cmd/apidiff@v0.0.0-20260529124908-c761662dc8c9
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          WORKDIR="$RUNNER_TEMP/base-tree"
+          rm -rf "$WORKDIR"
+          git worktree add "$WORKDIR" "$BASE_SHA"
+          # A base without api/v1beta1 (e.g. a one-time api dir rename) has no
+          # prior contract to break — skip the baseline rather than error.
+          if [ ! -d "$WORKDIR/api/v1beta1" ]; then
+            git worktree remove --force "$WORKDIR"
+            echo "::notice::base $BASE_SHA has no api/v1beta1; skipping apidiff baseline"
+            exit 0
+          fi
+          (cd "$WORKDIR" && apidiff -w "$RUNNER_TEMP/base-api.json" ./api/v1beta1)
+          git worktree remove --force "$WORKDIR"
+          apidiff "$RUNNER_TEMP/base-api.json" ./api/v1beta1 | tee diff.txt
+          if grep -q '^Incompatible changes:' diff.txt; then
+            if [ "${{ contains(github.event.pull_request.labels.*.name, 'breaking-change') }}" = "true" ]; then
+              echo "WARN: incompatible CRD API changes accepted via 'breaking-change' label"
+              exit 0
+            fi
+            echo "ERROR: incompatible CRD API changes detected. v1beta1 allows breaks but they need explicit acknowledgement: add the 'breaking-change' label to this PR if intentional."
+            exit 1
+          fi
+          echo "OK: no incompatible changes"
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: govulncheck (hard reachability gate)
+        # Pinned tool for reproducible behaviour; the vuln DB is fetched live, so
+        # a newly-disclosed advisory against an existing dependency still trips it.
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...
+
+  chart-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # ct lint --target-branch main needs history to compute the changed-chart set.
+          fetch-depth: 0
+      - name: Set up chart-testing (ct)
+        uses: helm/chart-testing-action@6ec842c01de15ebb84c8627d2744a0c2f2755c9f # v2.8.0
+      - name: Set up Helm
+        # Pin helm to the same version as the GitLab chart gate; running after the
+        # ct setup, it shadows the action's bundled helm so helm-unittest's
+        # plugin.yaml parses (platformHooks need helm >= 3.17).
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.18.4
+      - name: Install helm-unittest plugin (pinned) and promtool
+        run: |
+          # helm-unittest pinned to v1.1.1 (commit 9cf59a78dbb89f3e3c70c62d2570cd7e96b97845)
+          helm plugin install https://github.com/helm-unittest/helm-unittest --version v1.1.1
+          PROMTOOL_VERSION=3.1.0
+          curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v${PROMTOOL_VERSION}/prometheus-${PROMTOOL_VERSION}.linux-amd64.tar.gz" | tar -xz -C /tmp
+          sudo install -m 0755 "/tmp/prometheus-${PROMTOOL_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
+          promtool --version
+      - name: Chart lint, unittest, ct, promtool
+        # Mirrors the GitLab chart-lint job against the renamed charts. The -f glob
+        # is required: specs live in <chart>/unittests/, not helm-unittest's default
+        # tests/ glob, so without it the runner matches 0 files and silently passes.
+        run: |
+          helm lint charts/velkir charts/velkir-crds
+          helm unittest -f 'unittests/**/*_test.yaml' charts/velkir
+          helm unittest -f 'unittests/**/*_test.yaml' charts/velkir-crds
+          ct lint --target-branch main --chart-dirs charts --check-version-increment=false --validate-maintainers=false
+          cd tests/promtool && promtool test rules alerts.test.yaml
+
+  gitleaks:
+    # The gitleaks secret-scan is defined once in the reusable gitleaks-scan
+    # workflow (install + ruleset self-test + parity + whole-repo scan) and
+    # called both here (on pull_request) and from gitleaks.yml (on release
+    # tags), so the scan logic, fixtures, and parity guard live in exactly one
+    # place and the PR posture cannot drift from the tag posture.
+    uses: ./.github/workflows/gitleaks-scan.yml
+
+  leak-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Self-test — leak_gate fires on planted, passes clean (isolation)
+        # Proves the content-aware scanner actually detects a process-disclosure
+        # token before a clean whole-tree scan can pass vacuously. leak_gate exits
+        # 0 (clean), 1 (block-class hit), or 2 (fail-closed scan/config error); the
+        # planted fixture must produce EXACTLY rc=1 — rc=0 (didn't fire) or rc=2
+        # (error) both fail rather than being mistaken for a hit.
+        run: |
+          set -euo pipefail
+          # Presence-guarded like the sibling tooling steps (parity / host_swap):
+          # the public cut strips tools/publish/, so leak_gate.py is absent there
+          # and this self-test no-ops instead of hard-failing on a missing file.
+          if [ ! -f tools/publish/leak_gate.py ]; then
+            echo "tools/publish/leak_gate.py absent (public cut); skipping leak-gate self-test"
+            exit 0
+          fi
+          rc=0
+          python3 tools/publish/leak_gate.py .github/test-fixtures/leak-gate/planted || rc=$?
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::planted self-test failed (rc=$rc; expected 1=block-class hit, not 0=clean or 2=scan/config error)"
+            exit 1
+          fi
+          echo "OK: planted fixture tripped leak_gate (rc=1) as expected"
+          python3 tools/publish/leak_gate.py .github/test-fixtures/leak-gate/clean
+          echo "OK: clean fixture passed leak_gate (rc=0)"
+      - name: Scan the public deliverable for process-disclosure leaks
+        # Content-aware regression backstop over the published tree (catches a
+        # private token the gitleaks regex set might miss). The gate is meaningful
+        # on the POST-CUT public deliverable, so the scanned copy is made to match
+        # that tree before scanning. (This comment deliberately names no concrete
+        # private token — leak_gate scans this workflow file too.)
+        #   1. Prune paths that are never published, or that carry block-class
+        #      tokens as their own data so scanning them is a false positive:
+        #        - tools/publish/   — the scrub tooling itself;
+        #        - .gitleaks.toml   — the gitleaks ruleset (its regex literals are
+        #                             block-class tokens by construction);
+        #        - .github/test-fixtures/ — planted tokens by design (self-tested);
+        #        - .gitlab/ + .gitlab-ci.yml — private build infra, not published.
+        #   2. Apply the cutter's own host_swap (reusing cut.rewrite_tree) so the
+        #      retained production-reference registry/forge hosts in
+        #      docs/charts/README/scripts are rewritten to their public form
+        #      exactly as the publish cut does (guarded on cut.py presence).
+        # leak_gate.py runs from its in-repo path; only the scanned COPY is altered.
+        # A bare private-registry host that host_swap does not map (it covers only
+        # the path-qualified image forms) survives the rewrite; neutralizing that
+        # bare form is the docs rebrand's job, so until then this gate flags it.
+        # The whole step is presence-guarded like its siblings: the public cut
+        # strips tools/publish/, so leak_gate.py is absent there and this scan
+        # no-ops (the gitleaks job is the public-mirror secret scanner; this
+        # content-aware backstop runs where the tooling lives — the private repo).
+        run: |
+          set -euo pipefail
+          if [ ! -f tools/publish/leak_gate.py ]; then
+            echo "tools/publish/leak_gate.py absent (public cut); skipping whole-tree leak scan"
+            exit 0
+          fi
+          scan="$RUNNER_TEMP/leak-scan"
+          rsync -a \
+            --exclude='.git' \
+            --exclude='tools/publish' \
+            --exclude='.gitleaks.toml' \
+            --exclude='.github/test-fixtures' \
+            --exclude='.gitlab' \
+            --exclude='.gitlab-ci.yml' \
+            ./ "$scan/"
+          if [ -f tools/publish/cut.py ]; then
+            python3 -c "import sys; sys.path.insert(0, 'tools/publish'); import cut, scrub_config; cut.rewrite_tree('$scan', scrub_config.load_config('tools/publish/scrub_patterns.yaml'))"
+          fi
+          python3 tools/publish/leak_gate.py "$scan"
+          echo "OK: no process-disclosure leaks in the public deliverable"
+
+  dco:
+    runs-on: ubuntu-latest
+    # The accepted Signed-off-by shape, kept byte-identical to
+    # tools/publish/replay.py's _SIGNOFF so a sign-off that passes this gate is
+    # guaranteed to pass the downstream GitLab replay's verify_dco
+    # (test_dco_signoff_parity.py pins the two equal AND proves behavioral parity
+    # on edge-shaped commits). Case-sensitive, requires a `Name <email>` shape.
+    env:
+      DCO_SIGNOFF_RE: '^Signed-off-by: .+ <[^>]+>$'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Full history so the PR's base..head commit range is walkable.
+          fetch-depth: 0
+      - name: DCO — every non-merge commit carries a well-formed Signed-off-by trailer
+        # Sixth link of the pr-gate chain. Pure shell/git, no Node. check_range
+        # walks `git rev-list --no-merges <range>` and matches DCO_SIGNOFF_RE
+        # against the RAW commit body — exactly as replay.py's verify_dco does
+        # (_SIGNOFF over `git log --format=%B`) — so a sign-off that passes here
+        # replays cleanly. It deliberately does NOT gate on `git interpret-trailers
+        # --parse` output: --parse's --unfold joins a folded/continuation
+        # Signed-off-by onto one line and would ACCEPT a sign-off the raw-body
+        # replay match REJECTS (a false all-clear). interpret-trailers is used only
+        # to surface the recognized trailers in the failure diagnostic. The check
+        # verifies the trailer is PRESENT and well-formed, not that it names the
+        # commit author — author/sign-off correspondence is a maintainer-review
+        # step (CONTRIBUTING.md), out of this gate's scope. The helper is FIRST
+        # exercised against a throwaway repo holding a well-formed, a folded, a
+        # malformed, and an unsigned commit so a regression is caught here.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # Print every non-merge commit in <range> ($1, in repo $2, default .)
+          # whose RAW body lacks a well-formed Signed-off-by; return 1 if any are
+          # missing, 2 if the range cannot be walked (fail closed — a populated but
+          # unreachable range must never pass as "validated nothing").
+          check_range() {
+            local range="$1" repo="${2:-.}" missing=0 c commits raw
+            commits=$(git -C "$repo" rev-list --no-merges "$range") || {
+              echo "::error::DCO: cannot walk commit range '$range'"
+              return 2
+            }
+            # An empty range (all PR commits already in base) is legitimately clean.
+            [ -n "$commits" ] || return 0
+            # A read-loop (not `for c in $commits`) so iteration never rides on
+            # word-splitting the SHA list.
+            while IFS= read -r c; do
+              raw=$(git -C "$repo" show -s --format=%B "$c")
+              if ! grep -qE "$DCO_SIGNOFF_RE" <<<"$raw"; then
+                echo "::error::commit $c lacks a well-formed 'Signed-off-by: Name <email>' trailer (DCO)"
+                # Diagnostic only (not the binding check): what git recognized as
+                # trailers — helps a contributor spot a folded or malformed sign-off.
+                git -C "$repo" show -s --format=%B "$c" | git interpret-trailers --parse \
+                  | sed 's/^/    recognized-trailer: /' || true
+                missing=1
+              fi
+            done <<<"$commits"
+            return "$missing"
+          }
+
+          # Self-test: the helper must reject an unsigned, a folded, AND a malformed
+          # sign-off (naming each) and accept a well-formed one, before it gates the
+          # real PR. The folded case is load-bearing — it is exactly what
+          # interpret-trailers --unfold would wrongly accept. Output is captured so
+          # the synthetic offenders do not surface as live ::error:: annotations.
+          st="$(mktemp -d)"
+          git -C "$st" init -q
+          git -C "$st" config user.name  dco-selftest
+          git -C "$st" config user.email dco@selftest.invalid
+          git -C "$st" commit -q --allow-empty -m "base"
+          git -C "$st" commit -q --allow-empty -m "well-formed signoff" \
+            -m "Signed-off-by: Dev <dco@selftest.invalid>"
+          wf="$(git -C "$st" rev-parse HEAD)"
+          printf 'folded signoff\n\nSigned-off-by: Dev\n <dco@selftest.invalid>\n' > "$st/folded.msg"
+          git -C "$st" commit -q --allow-empty -F "$st/folded.msg"
+          git -C "$st" commit -q --allow-empty -m "malformed signoff" \
+            -m "signed-off-by: nobody"
+          git -C "$st" commit -q --allow-empty -m "unsigned change"
+          st_base="$(git -C "$st" rev-list --max-parents=0 HEAD)"
+          if check_range "${st_base}..HEAD" "$st" >"$RUNNER_TEMP/dco-st.log" 2>&1; then
+            echo "::error::DCO self-test failed: helper accepted a bad sign-off"
+            cat "$RUNNER_TEMP/dco-st.log"; exit 1
+          fi
+          if [ "$(grep -c 'lacks a well-formed' "$RUNNER_TEMP/dco-st.log")" -ne 3 ]; then
+            echo "::error::DCO self-test failed: expected 3 named offenders (folded + malformed + unsigned)"
+            cat "$RUNNER_TEMP/dco-st.log"; exit 1
+          fi
+          check_range "${st_base}..${wf}" "$st" >/dev/null 2>&1 || {
+            echo "::error::DCO self-test failed: helper rejected a well-formed sign-off"; exit 1
+          }
+          echo "OK: DCO self-test passed (rejects unsigned + folded + malformed, accepts well-formed)"
+
+          # Real check: every non-merge commit in the PR range is signed off.
+          if [ -z "${BASE_SHA:-}" ] || [ -z "${HEAD_SHA:-}" ]; then
+            echo "::error::missing PR base/head SHA (this job runs on pull_request only)"
+            exit 1
+          fi
+          check_range "${BASE_SHA}..${HEAD_SHA}" "."
+          echo "OK: all non-merge commits carry a well-formed Signed-off-by trailer"
+
+  changelog-tag:
+    runs-on: ubuntu-latest
+    # Seventh link of the pr-gate chain (after C-6 dco): ports the GitLab
+    # changelog-tag gate (.gitlab/ci/mr-gates.yml) to the public gate. A PR that
+    # changes api/v1beta1/*types*.go must add a docs/CHANGELOG.md entry (the
+    # additive-only CRD contract); scripts/check-changelog.sh is the shared gate
+    # body and this job feeds it the PR's labels + changed-file set. The
+    # GitLab-PROCESS gates (require-closes, ci-script-tests) are deliberately NOT
+    # ported — they enforce GitLab issue/MR conventions that don't apply to the
+    # public GitHub funnel; see CONTRIBUTING.md.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Full history so the base...head merge-base diff is computable.
+          fetch-depth: 0
+      - name: changelog-tag — CRD-types changes require a docs/CHANGELOG.md entry
+        # Build LABELS_JSON from the PR labels and CHANGED_FILES from the
+        # base...head three-dot diff (changes on HEAD relative to merge-base),
+        # then run the shared check. check-changelog.sh bypasses on type::ci /
+        # type::chore and fails when an api/v1beta1 *types*.go change lands without
+        # a docs/CHANGELOG.md entry.
+        env:
+          LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          CHANGED_FILES="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"
+          export CHANGED_FILES
+          ./scripts/check-changelog.sh
+
+  no-olm:
+    runs-on: ubuntu-latest
+    # OperatorHub/OLM deferral guard (docs/decisions/0001): fail the build if an
+    # OLM CSV, an OperatorHub bundle, or OperatorHub metadata appears in the tree,
+    # so the deferral cannot regress silently (it was review-only before #683). The
+    # ADR directory and this guard + its harness are excluded -- they name the
+    # forbidden tokens by design.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: No OperatorHub/OLM bundle artifacts in the tree
+        run: bash scripts/ci/no-olm-guard.sh .
