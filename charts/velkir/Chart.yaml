@@ -3,16 +3,16 @@ name: velkir
 description: Operator for Valkey + Sentinel HA clusters
 type: application
 
-# Bump on any chart-template / values.yaml change before retagging — Harbor
-# enforces tag immutability, so a release tag without a chart bump will
-# fail the chart push with a 412 once this version is already in the registry.
-version: 0.1.1
+# Bump on any chart-template / values.yaml change before retagging — the
+# registry enforces tag immutability, so a release tag without a chart bump
+# will fail the chart push with a 412 once this version is already published.
+version: 0.1.2
 # appVersion is the operator image tag this chart deploys. Pin
 # explicitly when bumping the chart (the chart-version convention — chart and
 # image release independently, so the chart bumper picks which image
 # version this chart targets). Must reference an image tag that exists
-# in Harbor with full attestations.
-appVersion: "v0.1.1"
+# in the registry with full attestations.
+appVersion: "v0.1.2"
 kubeVersion: ">=1.30.0-0"
 
 

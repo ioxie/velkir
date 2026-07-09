@@ -3,13 +3,13 @@ name: velkir-crds
 description: CustomResourceDefinitions for the Valkey Operator
 type: application
 
-# Bump on any CRD-template change before retagging — Harbor enforces tag
-# immutability, so a release tag without a chart bump will fail the chart
-# push with a 412 once this version is already in the registry.
-version: 0.1.1
+# Bump on any CRD-template change before retagging — the registry enforces
+# tag immutability, so a release tag without a chart bump will fail the chart
+# push with a 412 once this version is already published.
+version: 0.1.2
 # appVersion is the operator image tag this chart's CRDs target. Pin
 # explicitly when bumping the chart (the chart-version convention).
-appVersion: "v0.1.1"
+appVersion: "v0.1.2"
 kubeVersion: ">=1.30.0-0"
 
 

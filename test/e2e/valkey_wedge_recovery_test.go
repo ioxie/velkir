@@ -31,13 +31,19 @@ import (
 	"github.com/ioxie/velkir/test/utils"
 )
 
-// Dead-master wedge recovery: the two permanent-outage end-states where
-// every address the sentinel quorum knows is dead. Sentinel's own
-// failover provably cannot resolve either (its candidate set died with
-// the master), so a recovery here is attributable to the operator's
-// dead-master re-point + zero-master recovery election — the paths
-// these specs pin. Without them the cluster stays Ready=False forever
-// (the state previously required a full teardown to escape).
+// Dead-master wedge recovery: two permanent-outage scenarios the
+// operator must help resolve. Scenario 1 is a total wedge — every
+// address the sentinel quorum knows is dead, so Sentinel's own failover
+// provably cannot resolve it (its candidate set died with the master)
+// and the operator's dead-master re-point + zero-master recovery
+// election are the only escape. Scenario 2 kills the master and one
+// sentinel while the replicas survive, so Sentinel may promote a
+// replica on its own; there the operator's guaranteed contribution is
+// recovering the force-recreated, now peer-empty sentinel via
+// RESET+MONITOR. Each scenario pins the operator recovery path(s) it is
+// guaranteed to exercise; without operator involvement the cluster
+// stays Ready=False forever (the state previously required a full
+// teardown to escape).
 //
 // Both scenarios ride one Ordered container on one CR: scenario 2
 // deliberately continues from scenario 1's recovered state, mirroring
@@ -95,7 +101,7 @@ spec:
 			"--force", "--grace-period=0", "--wait=false"}, pods...)
 		mustRun(exec.Command("kubectl", args...))
 
-		assertWedgeRecovered(crName)
+		assertWedgeRecovered(crName, "SentinelDeadMasterRepoint", "RecoveryPromotionInitiated")
 	})
 
 	// Scenario 2 — the compound kill: operator + one sentinel + the
@@ -131,7 +137,8 @@ spec:
 			crName+"-sentinel-0", primary,
 			"--force", "--grace-period=0", "--wait=false"))
 
-		assertWedgeRecovered(crName)
+		assertWedgeRecovered(crName, "SentinelStrandedRecovery",
+			"SentinelDeadMasterRepoint", "RecoveryPromotionInitiated")
 	})
 })
 
@@ -142,7 +149,7 @@ spec:
 // is promotion (when needed) → REMOVE+MONITOR re-point → gossip →
 // Phase 7 relabel → replica reattach, with per-stage cooldowns —
 // but bounded: the pre-fix behavior is Ready=False forever.
-func assertWedgeRecovered(crName string) {
+func assertWedgeRecovered(crName string, operatorRecoveryReasons ...string) {
 	GinkgoHelper()
 
 	By("waiting for the CR to return to Ready=True")
@@ -190,15 +197,20 @@ func assertWedgeRecovered(crName string) {
 	}, 4*time.Minute, 10*time.Second).Should(Succeed(),
 		"all sentinels must converge onto a live master address")
 
-	By("verifying an operator recovery event fired (the sentinels alone cannot resolve this state)")
-	Eventually(func() string {
+	By("verifying an operator recovery event fired (proving operator involvement in the recovery)")
+	Eventually(func() error {
 		out, _ := utils.Run(exec.Command(
 			"kubectl", "-n", e2eNamespace, "get", "events",
 			"--field-selector", "involvedObject.name="+crName,
 			"-o", "jsonpath={range .items[*]}{.reason}{\"\\n\"}{end}",
 		))
-		return out
-	}, 2*time.Minute, 10*time.Second).Should(
-		Or(ContainSubstring("SentinelDeadMasterRepoint"), ContainSubstring("RecoveryPromotionInitiated")),
-		"recovery must be attributable to the operator's dead-master paths")
+		for _, reason := range operatorRecoveryReasons {
+			if strings.Contains(out, reason) {
+				return nil
+			}
+		}
+		return fmt.Errorf("no operator recovery event among [%s] in reasons:\n%s",
+			strings.Join(operatorRecoveryReasons, ", "), out)
+	}, 2*time.Minute, 10*time.Second).Should(Succeed(),
+		"recovery must be attributable to an operator recovery path")
 }

@@ -10,6 +10,26 @@ resources always deserialize unchanged.
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-07-09
+
+### Security
+
+- **Bounds-checked every `int32` ordinal conversion.** The helpers that derive
+  a StatefulSet pod's ordinal from its name or `apps.kubernetes.io/pod-index`
+  label now reject any value above `math.MaxInt32` before the narrowing
+  conversion, and the two count comparisons that narrowed are widened instead —
+  closing the integer-overflow conversion class (GitHub CodeQL "Incorrect
+  conversion between integer types"). A `gosec` **G115** lint gate is now
+  enabled in CI so the class cannot regress. No behavior change for any real
+  ordinal (always small).
+
+### Changed
+
+- **Dependency currency bumps.** `google.golang.org/grpc` 1.79.3 → 1.82.0 and
+  the OpenTelemetry Go core modules (`otel`, `otel/metric`, `otel/sdk`,
+  `otel/trace`) 1.43.0 → 1.44.0, with their transitive updates (`x/oauth2`,
+  `genproto`, `protobuf`, `gonum`). Indirect-only; no operator behavior change.
+
 ## [0.1.1] — 2026-07-08
 
 ### Added

@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"sort"
 	"strconv"
@@ -4579,11 +4580,10 @@ func (r *ValkeyReconciler) findPrimaryOrdinal(ctx context.Context, v *valkeyv1be
 		if !ok {
 			continue
 		}
-		n, err := strconv.Atoi(suffix)
-		if err != nil || n < 0 {
+		ord := parseOrdinal(suffix)
+		if ord < 0 {
 			continue
 		}
-		ord := int32(n) //nolint:gosec // ordinal range is bounded by replicas validation (<= 7 for sentinel, smaller elsewhere)
 		if minOrd < 0 || ord < minOrd {
 			minOrd = ord
 		}
@@ -4803,21 +4803,27 @@ func podReady(p *corev1.Pod) bool {
 	return false
 }
 
+// parseOrdinal converts a decimal StatefulSet ordinal string to an
+// int32, returning -1 when it is not a non-negative value that fits
+// int32. The explicit upper bound keeps the narrowing conversion
+// provably safe (a pod ordinal is always small in practice).
+func parseOrdinal(s string) int32 {
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 || n > math.MaxInt32 {
+		return -1
+	}
+	return int32(n)
+}
+
 // ordinalFromPodName returns the ordinal suffix of a StatefulSet
-// pod, or -1 when the name doesn't match the canonical
-// `<sts>-<N>` shape. Mirrors findPrimaryOrdinal's parsing — the
-// two helpers don't share extractable logic without first
-// refactoring callers, so for now they live side by side.
+// pod, or -1 when the name doesn't match the canonical `<sts>-<N>`
+// shape.
 func ordinalFromPodName(podName, crName string) int32 {
 	suffix, ok := strings.CutPrefix(podName, crName+"-")
 	if !ok {
 		return -1
 	}
-	n, err := strconv.Atoi(suffix)
-	if err != nil || n < 0 {
-		return -1
-	}
-	return int32(n) //nolint:gosec // ordinal bound by spec.valkey.replicas validation
+	return parseOrdinal(suffix)
 }
 
 // ordinalFromPod returns a StatefulSet pod's ordinal, preferring the
@@ -4831,8 +4837,8 @@ func ordinalFromPodName(podName, crName string) int32 {
 // ordinal. Mirrors the label-first detection in desiredRoleForPod.
 func ordinalFromPod(pod *corev1.Pod, crName string) int32 {
 	if idx, ok := pod.Labels[podIndexLabel]; ok {
-		if n, err := strconv.Atoi(idx); err == nil && n >= 0 {
-			return int32(n) //nolint:gosec // ordinal bound by spec.valkey.replicas validation
+		if o := parseOrdinal(idx); o >= 0 {
+			return o
 		}
 	}
 	return ordinalFromPodName(pod.Name, crName)

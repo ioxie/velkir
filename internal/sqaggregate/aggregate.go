@@ -150,7 +150,7 @@ func Aggregate(now time.Time, freshnessWindow time.Duration, quorum int32, sqs [
 		// observations. Treat as Lost so the Degraded path fires.
 		out.Quorum = sentinel.QuorumStatusLost
 		out.QuorumLost = true
-	case int32(quorumOK) < quorum: //nolint:gosec // quorumOK bounded by len(sqs)
+	case quorumOK < int(quorum):
 		out.Quorum = sentinel.QuorumStatusLost
 		out.QuorumLost = true
 	default:

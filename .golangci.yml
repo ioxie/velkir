@@ -11,6 +11,7 @@ linters:
     - goconst
     - gocyclo
     - goheader
+    - gosec
     - govet
     - ineffassign
     - lll
@@ -36,6 +37,14 @@ linters:
           enforcement, bounded client.List calls, and events catalog
           membership. Ships via .custom-gcl.yml; only active when running
           the custom-gcl binary (stock golangci-lint ignores this block).
+    gosec:
+      # Only G115 (integer overflow on a narrowing conversion) — the lint-time
+      # analog of the CodeQL "incorrect integer conversion" query, so this class
+      # is caught in CI rather than by a downstream code scanner. A narrowing
+      # conversion must carry an explicit bound (e.g. math.MaxInt32), never a
+      # //nolint suppression.
+      includes:
+        - G115
     goheader:
       # Year is a 4-digit regexp so existing "Copyright 2026." headers and any
       # future year both match; the rest is the exact Apache 2.0 block already

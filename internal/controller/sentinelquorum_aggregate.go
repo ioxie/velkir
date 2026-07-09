@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"math"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -80,8 +81,14 @@ func (r *ValkeyReconciler) aggregateSentinelQuorum(ctx context.Context, v *valke
 // no-op once quorum already meets or exceeds the majority.
 func clampQuorumToPoolMajority(quorum, replicas int32) int32 {
 	floor := sentinel.QuorumThreshold(int(replicas))
-	if int(quorum) < floor {
-		return int32(floor) //nolint:gosec // floor <= replicas, fits int32
+	// floor is a majority of replicas, so it is non-negative and fits
+	// int32; the explicit bound makes that visible to static analysis.
+	if floor < 0 || floor > math.MaxInt32 {
+		return quorum
 	}
-	return quorum
+	f := int32(floor)
+	if quorum >= f {
+		return quorum
+	}
+	return f
 }

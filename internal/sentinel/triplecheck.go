@@ -191,7 +191,7 @@ func EvaluateTripleCheck(in TripleCheckInputs) FailoverDecision {
 		}
 	}
 	consensus := ConsensusODown(in.Snapshot.Primary.ODown, in.Now, in.ODownStaleness)
-	if int32(consensus) < in.Quorum {
+	if consensus < int(in.Quorum) {
 		return FailoverDecision{
 			Allow:  false,
 			Reason: TripleCheckReasonNoODownConsensus,

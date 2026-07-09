@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -99,7 +100,7 @@ func sentinelPodOrdinal(podName, stsName string) (int32, bool) {
 		return 0, false
 	}
 	n, err := strconv.Atoi(strings.TrimPrefix(podName, prefix))
-	if err != nil || n < 0 {
+	if err != nil || n < 0 || n > math.MaxInt32 {
 		return 0, false
 	}
 	return int32(n), true
